@@ -4,3 +4,8 @@ testbenches/debug/
 testbenches/results/
 testbenches/stimulus/
 __pycache__/
+
+# Python and simulation artifacts
+*.pyc
+*.vcd
+*.log
