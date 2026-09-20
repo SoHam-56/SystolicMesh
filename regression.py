@@ -270,70 +270,63 @@ def _run_group(
 
 
 def _report(results: list, N: int, fast: bool, group: str) -> str:
+    """Plain-text readiness report alongside the per-run logs."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     passed = sum(1 for r in results if r["status"] == "PASS")
     total = len(results)
-    verdict = (
-        "✅ READY"
-        if passed == total
-        else f"❌ NOT READY  ({total - passed} failure{'s' if total-passed>1 else ''})"
-    )
+    verdict = ("READY" if passed == total
+               else f"NOT READY ({total - passed} failure{'s' if total-passed>1 else ''})")
 
-    tbl_hdr = (
-        "| Test | Tile | Result | Sets | Exact% | Tol% | Fails | Avg Cycles | Wall |\n"
-        "|------|------|--------|------|--------|------|-------|------------|------|"
-    )
+    W = 96
+    L = []
+    L.append("=" * W)
+    L.append("SYSTOLICMESH IP — READINESS REPORT")
+    L.append("=" * W)
+    L.append("")
+    L.append(f"Date          : {ts}")
+    L.append(f"Matrix size   : {N}x{N}")
+    L.append(f"Group         : {group}")
+    L.append(f"Mode          : {'fast' if fast else 'full'}")
+    L.append(f"Runs          : {total}    Passed: {passed}    Failed: {total - passed}")
+    L.append("")
+    L.append(f"RESULT        : {verdict}")
+    L.append("")
 
-    def _row_md(r):
-        sym = "✅" if r["status"] == "PASS" else "❌"
-        tot = max(r["elements"], 1)
-        ep = 100 * (r["elements"] - r["tol"] - r["fail_els"]) / tot
-        tp = 100 * r["tol"] / tot
-        sets = f"{r['passed']}/{r['passed'] + r['failed']}"
-        return (
-            f"| {r['name']} | T={r['tile']} | {sym} {r['status']} | "
-            f"{sets} | {ep:.1f}% | {tp:.1f}% | {r['fail_els']} | "
-            f"{r['avg_cyc']} | {r['wall']:.0f}s |"
-        )
-
-    def _section(title, rows):
+    def _rows(title, rows):
         if not rows:
-            return []
-        return ["", f"## {title}", "", tbl_hdr] + [_row_md(r) for r in rows]
+            return
+        L.append("-" * W)
+        L.append(title.upper())
+        L.append("-" * W)
+        L.append(f"{'test':<22}{'tile':>6}{'result':>9}{'sets':>8}{'exact':>9}"
+                 f"{'tol':>9}{'fails':>7}{'avg cyc':>10}{'wall':>8}")
+        L.append("-" * W)
+        for r in rows:
+            tot = max(r["elements"], 1)
+            ep = 100 * (r["elements"] - r["tol"] - r["fail_els"]) / tot
+            tp = 100 * r["tol"] / tot
+            sets = f"{r['passed']}/{r['passed'] + r['failed']}"
+            L.append(f"{r['name']:<22}{'T=' + str(r['tile']):>6}{r['status']:>9}"
+                     f"{sets:>8}{ep:>8.1f}%{tp:>8.1f}%{r['fail_els']:>7}"
+                     f"{r['avg_cyc']:>10}{r['wall']:>7.0f}s")
+        L.append("")
 
-    mm_res = [r for r in results if r["group"] == "matmul"]
-    cv_res = [r for r in results if r["group"] == "conv"]
+    _rows("Matrix multiplication", [r for r in results if r["group"] == "matmul"])
+    _rows("Convolution", [r for r in results if r["group"] == "conv"])
 
-    lines = [
-        "# SystolicMesh IP — Readiness Report",
-        "",
-        f"**Date:** {ts}  ",
-        f"**Matrix size:** {N}×{N}  ",
-        f"**Group:** {group}  ",
-        f"**Mode:** {'fast' if fast else 'full'}  ",
-        f"**Overall:** {verdict}  ",
-        f"**Runs:** {total}  **Passed:** {passed}  **Failed:** {total - passed}",
-        "",
-        "---",
-    ]
-    lines += _section("Matrix Multiplication", mm_res)
-    lines += _section("Convolution", cv_res)
-    lines += [
-        "",
-        "---",
-        "",
-        "## Notes",
-        "",
-        "- TB patched once per (tile × group); make handles incremental compilation",
-        "- Tolerance: RELATIVE ≤ 1%",
-        "- Reference: float64 matmul cast to float32",
-        "- Data type: IEEE-754 Float32",
-        "- Tool: Verilator 5.048  |  Clock: 10 ns",
-    ]
+    L.append("-" * W)
+    L.append("NOTES")
+    L.append("-" * W)
+    L.append("* TB patched once per (tile x group); make handles incremental compilation")
+    L.append("* Tolerance: RELATIVE <= 1%")
+    L.append("* Reference: float64 matmul cast to float32")
+    L.append("* Data type: IEEE-754 Float32")
+    L.append("* Tool: Verilator  |  Clock: 10 ns")
+    L.append("=" * W)
 
-    path = os.path.join(RESULTS_DIR, "readiness_report.md")
+    path = os.path.join(RESULTS_DIR, "readiness_report.log")
     with open(path, "w") as fh:
-        fh.write("\n".join(lines))
+        fh.write("\n".join(L) + "\n")
     return path
 
 
