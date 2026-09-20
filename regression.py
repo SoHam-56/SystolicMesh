@@ -141,7 +141,10 @@ def _make() -> tuple:
     """
     t0 = time.time()
     r = subprocess.run(["make"], cwd=ROOT, capture_output=True, text=True)
-    return r.stdout + r.stderr, time.time() - t0
+    out = r.stdout + r.stderr
+    if r.returncode != 0:
+        out += f"\nBUILDFAIL: make exited {r.returncode}\n"
+    return out, time.time() - t0
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +153,9 @@ def _make() -> tuple:
 
 
 def _parse(raw: str) -> dict:
+    if "BUILDFAIL" in raw or "version `GLIBC" in raw or "%Error" in raw:
+        return dict(status="NO-RUN", passed=0, failed=0, elements=0, tol=0,
+                    fail_els=0, avg_cyc=0)
     if "FATAL" in raw or "Timeout" in raw:
         return dict(
             status="TIMEOUT",
@@ -172,6 +178,11 @@ def _parse(raw: str) -> dict:
     fail_els = raw.count("[FAIL]")
     cycles = re.findall(r"Set\s+\d+\s*:\s*(\d+)\s*cycles", raw)
     avg_cyc = sum(int(c) for c in cycles) // len(cycles) if cycles else 0
+    # No sets and no elements means the testbench never checked anything. Reporting that
+    # as FAIL hides the real cause, which is usually a stale or unrunnable simulator binary.
+    if passed + failed == 0 or elements == 0:
+        return dict(status="NO-RUN", passed=0, failed=0, elements=0, tol=0,
+                    fail_els=0, avg_cyc=avg_cyc)
     status = "PASS" if fail_els == 0 and "SUCCESS" in raw else "FAIL"
 
     return dict(
