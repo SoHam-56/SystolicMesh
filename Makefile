@@ -44,6 +44,7 @@ VERILATOR_FLAGS = \
 	--timing \
 	--top-module $(TOP_MODULE) \
 	--threads 8 \
+	--build-jobs $(shell nproc) \
 	--sv \
 	-I$(SRC_DIR) \
 	-I$(TB_DIR) \
