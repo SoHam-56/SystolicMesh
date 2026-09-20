@@ -57,7 +57,7 @@ module SystolicMesh #(
     end
   end
   assign west_queue_empty_o  = (ptr_A == 0);
-  assign north_queue_empty_o = (ptr_B == 1);
+  assign north_queue_empty_o = (ptr_B == 0);
 
   typedef enum logic [2:0] {
     IDLE,
