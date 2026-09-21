@@ -33,6 +33,8 @@ module ProcessingElement #(
 
   wire [DATA_WIDTH - 1:0] mac_result;
   wire mac_done;
+  wire mac_ready;
+  wire mac_busy;
   reg mac_start;
 
   wire select_accumulator_gated;
@@ -63,7 +65,7 @@ module ProcessingElement #(
   // this PE is busy. idle_o lets the mesh hold the drain wave until every PE has finished,
   // which the wave's one-cycle-per-column sweep otherwise assumes.
   assign accept_o = (current_state == IDLE) & inputs_valid_i;
-  assign idle_o   = (current_state == IDLE);
+  assign idle_o   = (current_state == IDLE) & ~mac_busy;  // the accumulator must be final too
 
   always @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -87,7 +89,7 @@ module ProcessingElement #(
         next_state = MAC_COMPUTE;
       end
       MAC_COMPUTE: begin
-        if (mac_done) next_state = OUTPUT;
+        if (mac_ready) next_state = OUTPUT;
         else next_state = MAC_COMPUTE;
       end
       OUTPUT: begin
@@ -134,7 +136,6 @@ module ProcessingElement #(
 
       buffered_north <= {DATA_WIDTH{1'b0}};
       buffered_west <= {DATA_WIDTH{1'b0}};
-      buffered_accumulator <= {DATA_WIDTH{1'b0}};
 
       passthrough_valid_o <= 1'b0;
       fwd_valid_o <= 1'b0;
@@ -146,7 +147,6 @@ module ProcessingElement #(
           mac_start <= 1'b0;
           passthrough_valid_o <= 1'b0;
           fwd_valid_o <= 1'b0;
-          last_element_east_o <= 1'b0;
 
           // Handle accumulator draining in IDLE state
           if (select_accumulator_gated) begin
@@ -165,7 +165,6 @@ module ProcessingElement #(
           passthrough_valid_o <= 1'b0;
           fwd_valid_o <= 1'b0;
           accumulator_valid_o <= 1'b0;
-          last_element_east_o <= 1'b0;
         end
 
         // Hand the operands on now; the MAC keeps running behind them.
@@ -177,7 +176,6 @@ module ProcessingElement #(
           mac_start <= 1'b0;
           passthrough_valid_o <= 1'b0;
           accumulator_valid_o <= 1'b0;
-          last_element_east_o <= 1'b0;
         end
 
         MAC_COMPUTE: begin
@@ -186,12 +184,7 @@ module ProcessingElement #(
           passthrough_valid_o <= 1'b0;
           fwd_valid_o <= 1'b0;
           accumulator_valid_o <= 1'b0;
-          last_element_east_o <= 1'b0;
 
-          if (mac_done) begin                             // Buffer the MAC result and generate last_element pulse when MAC is done
-            buffered_accumulator <= mac_result;
-            last_element_east_o  <= last_element_pulse;
-          end
         end
 
         OUTPUT: begin
@@ -207,7 +200,6 @@ module ProcessingElement #(
             accumulator_valid_o <= 1'b0;
             east_o <= buffered_west;
           end
-          last_element_east_o <= 1'b0;
         end
 
         default: begin
@@ -215,6 +207,17 @@ module ProcessingElement #(
           fwd_valid_o <= 1'b0;
         end
       endcase
+    end
+  end
+
+  // Results now land after the FSM has moved on, so these follow mac_done rather than a state.
+  always @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      buffered_accumulator <= {DATA_WIDTH{1'b0}};
+      last_element_east_o  <= 1'b0;
+    end else begin
+      last_element_east_o <= last_element_pulse;
+      if (mac_done) buffered_accumulator <= mac_result;
     end
   end
 
@@ -227,6 +230,8 @@ module ProcessingElement #(
       .weight_i(north_i),
       .start_i(mac_start),
       .mac_done_o(mac_done),
+      .ready_o(mac_ready),
+      .busy_o(mac_busy),
       .result_o(mac_result)
   );
 

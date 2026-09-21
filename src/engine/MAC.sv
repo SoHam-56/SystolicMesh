@@ -1,5 +1,15 @@
 `timescale 1ns / 100ps
 
+// Accumulating MAC: result_o += data_i * weight_i, one operation per start_i.
+//
+// The multiply and the accumulate used to run as two blocking states, so each operation cost
+// the full multiplier plus adder latency, about 15 cycles, even though only the accumulate is
+// loop-carried. The multiply for the next operation does not depend on the accumulator, so it
+// now overlaps the current accumulate and the recurrence is the adder alone.
+//
+// ready_o paces the issue: an accumulate can start only once the previous one has written the
+// accumulator back, which is ADD_LAT+1 cycles. Issuing at that rate means a multiply result is
+// never waiting on a busy adder, so no result queue is needed.
 module MAC #(
     parameter DATA_WIDTH = 32
 ) (
@@ -9,104 +19,77 @@ module MAC #(
     input  wire [DATA_WIDTH - 1:0] weight_i,
     input  wire                    start_i,
     output reg                     mac_done_o,
+    output wire                    ready_o,
+    output wire                    busy_o,
     output reg  [DATA_WIDTH - 1:0] result_o
 );
 
-  reg [DATA_WIDTH - 1:0] mul_in1, mul_in2, add_in1, add_in2;
-  reg [DATA_WIDTH - 1:0] accumulator;
-  wire [DATA_WIDTH - 1:0] adder_result, mul_result;
-  wire add_done, mul_done;
+  localparam int MUL_LAT = 8;  // fp32Multiplier: valid_i at t, done_o at t+8
+  localparam int ADD_LAT = 5;  // fp32Adder: valid_i at t, done_o at t+5
+  localparam int MIN_GAP = ADD_LAT + 1;  // accumulator write-back lands a cycle after the add
 
-  typedef enum reg [1:0] {
-    IDLE = 2'b00,
-    MULTIPLY = 2'b01,
-    ACCUMULATE = 2'b10,
-    DONE = 2'b11
-  } state_t;
-  state_t current_state, next_state;
+  reg [DATA_WIDTH-1:0] accumulator;
+  reg [DATA_WIDTH-1:0] mul_in1, mul_in2;
+  reg                  mul_valid;
 
-  // Previous state register to detect state transitions
-  state_t prev_state;
+  wire [DATA_WIDTH-1:0] mul_result, adder_result;
+  wire                  mul_done, add_done;
+
+  // Cycles since the last issue, saturating. Nothing may be issued until the accumulator from
+  // the previous operation is back.
+  reg [3:0] gap;
+  reg       started;
+
+  assign ready_o = ~started | (gap >= MIN_GAP[3:0]);
+
+  // An operation is in flight from the moment it is issued until its accumulate retires. The
+  // PE goes idle well before that now, so it needs this to know the accumulator is final.
+  reg [1:0] inflight;
+  assign busy_o = (inflight != 2'd0);
+
+  always @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) inflight <= 2'd0;
+    else
+      case ({start_i & ready_o, add_done})
+        2'b10:   inflight <= inflight + 2'd1;
+        2'b01:   inflight <= inflight - 2'd1;
+        default: ;
+      endcase
+  end
 
   always @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
-      current_state <= IDLE;
-      prev_state <= IDLE;
+      gap     <= '0;
+      started <= 1'b0;
     end else begin
-      prev_state <= current_state;
-      current_state <= next_state;
+      if (start_i & ready_o) begin
+        gap     <= '0;
+        started <= 1'b1;
+      end else if (gap != 4'hF) begin
+        gap <= gap + 1'b1;
+      end
     end
   end
 
-  always @(*) begin
-    case (current_state)
-      IDLE: begin
-        if (start_i) next_state = MULTIPLY;
-        else next_state = IDLE;
-      end
-      MULTIPLY: begin
-        if (mul_done) next_state = ACCUMULATE;
-        else next_state = MULTIPLY;
-      end
-      ACCUMULATE: begin
-        if (add_done) next_state = DONE;
-        else next_state = ACCUMULATE;
-      end
-      DONE: begin
-        next_state = IDLE;
-      end
-      default: next_state = IDLE;
-    endcase
-  end
-
-  // Generate single-cycle pulses for valid_i signals
-  wire mul_valid_pulse = (current_state == MULTIPLY) && (prev_state != MULTIPLY);
-  wire add_valid_pulse = (current_state == ACCUMULATE) && (prev_state != ACCUMULATE);
-
-  // Control signals and data path
+  // Multiply stage: issued straight from the inputs, never blocked by the accumulate.
   always @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
-      result_o <= {DATA_WIDTH{1'b0}};
-      accumulator <= {DATA_WIDTH{1'b0}};
-      mul_in1 <= {DATA_WIDTH{1'b0}};
-      mul_in2 <= {DATA_WIDTH{1'b0}};
-      add_in1 <= {DATA_WIDTH{1'b0}};
-      add_in2 <= {DATA_WIDTH{1'b0}};
-      mac_done_o <= 1'b0;
+      mul_in1   <= {DATA_WIDTH{1'b0}};
+      mul_in2   <= {DATA_WIDTH{1'b0}};
+      mul_valid <= 1'b0;
     end else begin
-      case (current_state)
-        IDLE: begin
-          mac_done_o <= 1'b0;
-          if (start_i) begin
-            mul_in1 <= data_i;
-            mul_in2 <= weight_i;
-          end
-        end
-        MULTIPLY: begin
-          // Wait for multiplication to complete
-          if (mul_done) begin
-            add_in1 <= accumulator;
-            add_in2 <= mul_result;
-          end
-        end
-        ACCUMULATE: begin
-          // Wait for addition to complete
-          if (add_done) begin
-            accumulator <= adder_result;
-            result_o <= adder_result;
-          end
-        end
-        DONE: begin
-          mac_done_o <= 1'b1;
-        end
-      endcase
+      mul_valid <= start_i & ready_o;
+      if (start_i & ready_o) begin
+        mul_in1 <= data_i;
+        mul_in2 <= weight_i;
+      end
     end
   end
 
   fp32Multiplier MUL (
       .clk_i      (clk_i),
       .rstn_i     (rstn_i),
-      .valid_i    (mul_valid_pulse),
+      .valid_i    (mul_valid),
       .A          (mul_in1),
       .B          (mul_in2),
       .result_o   (mul_result),
@@ -116,21 +99,26 @@ module MAC #(
       .invalid_o  ()
   );
 
-  // Adder_32 ADD (
-  //     .clk_i(clk_i),
-  //     .rstn_i(rstn_i),
-  //     .valid_i(add_valid_pulse),
-  //     .A(add_in1),
-  //     .B(add_in2),
-  //     .Result(adder_result),
-  //     .done_o(add_done)
-  // );
+  // Accumulate stage: fires the cycle a product appears, which by construction is a cycle the
+  // adder is free.
+  reg [DATA_WIDTH-1:0] add_in2;
+  reg                  add_valid;
+
+  always @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      add_in2   <= {DATA_WIDTH{1'b0}};
+      add_valid <= 1'b0;
+    end else begin
+      add_valid <= mul_done;
+      if (mul_done) add_in2 <= mul_result;
+    end
+  end
 
   fp32Adder ADD (
       .clk_i      (clk_i),
       .rstn_i     (rstn_i),
-      .valid_i    (add_valid_pulse),
-      .A          (add_in1),
+      .valid_i    (add_valid),
+      .A          (accumulator),
       .B          (add_in2),
       .result_o   (adder_result),
       .done_o     (add_done),
@@ -138,5 +126,19 @@ module MAC #(
       .underflow_o(),
       .invalid_o  ()
   );
+
+  always @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      accumulator <= {DATA_WIDTH{1'b0}};
+      result_o    <= {DATA_WIDTH{1'b0}};
+      mac_done_o  <= 1'b0;
+    end else begin
+      mac_done_o <= add_done;
+      if (add_done) begin
+        accumulator <= adder_result;
+        result_o    <= adder_result;
+      end
+    end
+  end
 
 endmodule
