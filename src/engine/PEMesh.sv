@@ -24,6 +24,9 @@ module PEMesh #(
   wire [DATA_WIDTH-1:0] north_connections[0:N][0:N-1];  // Data connections (North-South flow)
   wire [DATA_WIDTH-1:0] west_connections[0:N-1][0:N];  // Weight connections (West-East flow)
   wire inputs_valid_internal [0:N-1][0:N-1];              // Valid signal connections (follow the systolic flow pattern)
+  wire fwd_valid [0:N-1][0:N-1];                          // Early passthrough valid, released before the MAC retires
+  wire pe_accept [0:N-1][0:N-1];                          // High when a PE takes its inputs, clears that PE's join
+  wire pe_idle [0:N-1][0:N-1];                            // High when a PE has nothing in flight
   wire accumulator_valid_connections[0:N-1][0:N];  // Accumulator valid connections (West-East flow)
   wire last_element_horizontal [0:N-1][0:N];              // last_element connections (horizontal flow in bottom row)
 
@@ -39,7 +42,24 @@ module PEMesh #(
     if (!rstn_i) matrix_mult_done_ff <= 1'b0;
     else matrix_mult_done_ff <= done_o;
   end
-  wire start_wave = done_o & ~matrix_mult_done_ff;
+  wire all_pe_idle;
+  logic all_idle_r;
+  always_comb begin
+    all_idle_r = 1'b1;
+    foreach (pe_idle[i, j]) if (!pe_idle[i][j]) all_idle_r = 1'b0;
+  end
+  assign all_pe_idle = all_idle_r;
+
+  // done_o's rising edge is one cycle wide, so the request is latched and the wave released
+  // once every PE is actually idle. Gating the edge directly would drop it.
+  logic drain_pending;
+  wire  start_wave = drain_pending & all_pe_idle & ~wave_active;
+
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) drain_pending <= 1'b0;
+    else if (done_o & ~matrix_mult_done_ff) drain_pending <= 1'b1;
+    else if (start_wave) drain_pending <= 1'b0;
+  end
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -80,6 +100,9 @@ module PEMesh #(
             .south_o(north_connections[row+1][col]),
             .east_o(west_connections[row][col+1]),
             .passthrough_valid_o(passthrough_valid_o[row][col]),
+            .fwd_valid_o(fwd_valid[row][col]),
+            .accept_o(pe_accept[row][col]),
+            .idle_o(pe_idle[row][col]),
             .accumulator_valid_o(accumulator_valid_connections[row][col+1]),
             .last_element_east_o(last_element_horizontal[row][col+1])
         );
@@ -119,14 +142,48 @@ module PEMesh #(
   generate
     for (row = 0; row < N; row = row + 1) begin : gen_valid_row
       for (col = 0; col < N; col = col + 1) begin : gen_valid_col
+        // Chained off fwd_valid, not passthrough_valid, so a neighbour need not wait out this
+        // PE's multiply and add. Each incoming valid is latched and held until the PE accepts:
+        // the pulses are one cycle wide and, once PEs run at independent offsets, they neither
+        // coincide with each other nor with the consumer being idle.
         if (row == 0 && col == 0)
           assign inputs_valid_internal[row][col] = inputs_valid_i;                    // Top-left PE gets external inputs_valid
-        else if (row == 0)
-          assign inputs_valid_internal[row][col] = passthrough_valid_o[row][col-1];   // Top row (except top-left): gets valid from western neighbor
-        else if (col == 0)
-          assign inputs_valid_internal[row][col] = passthrough_valid_o[row-1][col];   // Left column (except top-left): gets valid from northern neighbor
-        else
-          assign inputs_valid_internal[row][col] = passthrough_valid_o[row-1][col] & passthrough_valid_o[row][col-1]; // Interior PEs: AND of northern and western neighbor valid signals
+        else if (row == 0) begin : gen_join_w
+          reg west_seen;
+          assign inputs_valid_internal[row][col] = west_seen | fwd_valid[row][col-1];
+          always @(posedge clk_i or negedge rstn_i) begin
+            if (!rstn_i) west_seen <= 1'b0;
+            else if (pe_accept[row][col]) west_seen <= 1'b0;
+            else if (fwd_valid[row][col-1]) west_seen <= 1'b1;
+          end
+        end
+        else if (col == 0) begin : gen_join_n
+          reg north_seen;
+          assign inputs_valid_internal[row][col] = north_seen | fwd_valid[row-1][col];
+          always @(posedge clk_i or negedge rstn_i) begin
+            if (!rstn_i) north_seen <= 1'b0;
+            else if (pe_accept[row][col]) north_seen <= 1'b0;
+            else if (fwd_valid[row-1][col]) north_seen <= 1'b1;
+          end
+        end
+        else begin : gen_join
+          reg north_seen, west_seen;
+          wire north_now = north_seen | fwd_valid[row-1][col];
+          wire west_now = west_seen | fwd_valid[row][col-1];
+          assign inputs_valid_internal[row][col] = north_now & west_now;
+          always @(posedge clk_i or negedge rstn_i) begin
+            if (!rstn_i) begin
+              north_seen <= 1'b0;
+              west_seen  <= 1'b0;
+            end else if (pe_accept[row][col]) begin
+              north_seen <= 1'b0;
+              west_seen  <= 1'b0;
+            end else begin
+              if (fwd_valid[row-1][col]) north_seen <= 1'b1;
+              if (fwd_valid[row][col-1]) west_seen <= 1'b1;
+            end
+          end
+        end
       end
     end
   endgenerate

@@ -20,6 +20,9 @@ module ProcessingElement #(
     output reg [DATA_WIDTH - 1:0] east_o,   // Muxed: data passthrough OR accumulator output
 
     output reg passthrough_valid_o,  // Valid for south_o and east_o (passthrough mode)
+    output reg fwd_valid_o,          // Same data, released as soon as it is buffered
+    output wire accept_o,            // High on the cycle this PE takes its inputs
+    output wire idle_o,              // High when this PE has no element in flight
     output reg accumulator_valid_o,  // Valid for east_o when in accumulator mode
     output reg last_element_east_o
 );
@@ -41,16 +44,26 @@ module ProcessingElement #(
   wire last_element_pulse;
   assign last_element_pulse = mac_done & last_element_captured;
 
-  typedef enum reg [1:0] {
-    IDLE        = 2'b00,
-    LOAD_DATA   = 2'b01,
-    MAC_COMPUTE = 2'b10,
-    OUTPUT      = 2'b11
+  // FORWARD releases the passthrough operands to the neighbours before the MAC finishes.
+  // Neither south_o nor east_o depends on mac_result, so holding them until OUTPUT made the
+  // whole wavefront advance one PE per MAC instead of one PE per hop.
+  typedef enum reg [2:0] {
+    IDLE        = 3'b000,
+    LOAD_DATA   = 3'b001,
+    FORWARD     = 3'b010,
+    MAC_COMPUTE = 3'b011,
+    OUTPUT      = 3'b100
   } state_t;
 
   state_t current_state, next_state;
 
   assign select_accumulator_gated = select_accumulator_i & (current_state == IDLE);
+
+  // The upstream join holds its valid until accept_o fires, so a forward is never dropped while
+  // this PE is busy. idle_o lets the mesh hold the drain wave until every PE has finished,
+  // which the wave's one-cycle-per-column sweep otherwise assumes.
+  assign accept_o = (current_state == IDLE) & inputs_valid_i;
+  assign idle_o   = (current_state == IDLE);
 
   always @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -68,6 +81,9 @@ module ProcessingElement #(
         else next_state = IDLE;
       end
       LOAD_DATA: begin
+        next_state = FORWARD;
+      end
+      FORWARD: begin
         next_state = MAC_COMPUTE;
       end
       MAC_COMPUTE: begin
@@ -121,6 +137,7 @@ module ProcessingElement #(
       buffered_accumulator <= {DATA_WIDTH{1'b0}};
 
       passthrough_valid_o <= 1'b0;
+      fwd_valid_o <= 1'b0;
       accumulator_valid_o <= 1'b0;
       mac_start <= 1'b0;
     end else begin
@@ -128,6 +145,7 @@ module ProcessingElement #(
         IDLE: begin
           mac_start <= 1'b0;
           passthrough_valid_o <= 1'b0;
+          fwd_valid_o <= 1'b0;
           last_element_east_o <= 1'b0;
 
           // Handle accumulator draining in IDLE state
@@ -145,6 +163,19 @@ module ProcessingElement #(
 
           mac_start <= 1'b1;
           passthrough_valid_o <= 1'b0;
+          fwd_valid_o <= 1'b0;
+          accumulator_valid_o <= 1'b0;
+          last_element_east_o <= 1'b0;
+        end
+
+        // Hand the operands on now; the MAC keeps running behind them.
+        FORWARD: begin
+          south_o <= buffered_north;
+          east_o <= buffered_west;
+          fwd_valid_o <= 1'b1;
+
+          mac_start <= 1'b0;
+          passthrough_valid_o <= 1'b0;
           accumulator_valid_o <= 1'b0;
           last_element_east_o <= 1'b0;
         end
@@ -153,6 +184,7 @@ module ProcessingElement #(
 
           mac_start <= 1'b0;
           passthrough_valid_o <= 1'b0;
+          fwd_valid_o <= 1'b0;
           accumulator_valid_o <= 1'b0;
           last_element_east_o <= 1'b0;
 
@@ -164,6 +196,7 @@ module ProcessingElement #(
 
         OUTPUT: begin
           south_o <= buffered_north;
+          fwd_valid_o <= 1'b0;
 
           if (accumulator_drain_flag) begin
             accumulator_valid_o <= 1'b1;
@@ -175,6 +208,11 @@ module ProcessingElement #(
             east_o <= buffered_west;
           end
           last_element_east_o <= 1'b0;
+        end
+
+        default: begin
+          mac_start <= 1'b0;
+          fwd_valid_o <= 1'b0;
         end
       endcase
     end
