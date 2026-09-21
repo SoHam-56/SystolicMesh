@@ -18,6 +18,7 @@ module MAC #(
     input  wire [DATA_WIDTH - 1:0] data_i,
     input  wire [DATA_WIDTH - 1:0] weight_i,
     input  wire                    start_i,
+    input  wire                    clear_i,   // zero the accumulator between matmuls
     output reg                     mac_done_o,
     output wire                    ready_o,
     output wire                    busy_o,
@@ -134,10 +135,11 @@ module MAC #(
       mac_done_o  <= 1'b0;
     end else begin
       mac_done_o <= add_done;
-      if (add_done) begin
-        accumulator <= adder_result;
-        result_o    <= adder_result;
-      end
+      // clear_i comes from the drain, which is after the last add of a pass, so it cannot race
+      // a result. Without it the accumulator carries into the next matmul.
+      if (clear_i) accumulator <= {DATA_WIDTH{1'b0}};
+      else if (add_done) accumulator <= adder_result;
+      if (add_done) result_o <= adder_result;
     end
   end
 

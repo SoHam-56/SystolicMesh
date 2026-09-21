@@ -229,6 +229,7 @@ module ProcessingElement #(
       .data_i(west_i),
       .weight_i(north_i),
       .start_i(mac_start),
+      .clear_i(select_accumulator_gated),  // the drain has taken the value; reset for the next pass
       .mac_done_o(mac_done),
       .ready_o(mac_ready),
       .busy_o(mac_busy),
