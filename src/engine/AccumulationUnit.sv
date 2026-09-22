@@ -17,6 +17,7 @@ module AccumulationUnit #(
     input logic clk_i,
     rstn_i,
     start_i,
+    rearm_i,
 
     input  logic [P-1:0][DATA_WIDTH-1:0] tile_data_i,
     input  logic [P-1:0]                 tile_valid_i,
@@ -170,7 +171,9 @@ module AccumulationUnit #(
           else w_idx <= w_idx + 1'b1;
         end
 
-        RDONE: ;  // latched, as before: the mesh resets the unit between matmuls
+        // Was latched with no exit at all - the comment claiming the mesh resets
+        // this unit between matmuls was never true, there was no reset port.
+        RDONE: if (rearm_i) r_curr <= RIDLE;
 
         default: r_curr <= RIDLE;
       endcase
