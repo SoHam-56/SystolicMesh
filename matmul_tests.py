@@ -77,12 +77,20 @@ def _write_set(A: np.ndarray, B: np.ndarray,
 
 def _pad_to(sets: list, target: int) -> list:
     """
-    Pad a list of (A, B) pairs to exactly `target` entries by repeating
-    the last real pair.  The TB will run the extras; since they are
-    identical to the last real set they will pass without masking real failures.
+    Pad a list of (A, B) pairs to exactly `target` entries with fresh random pairs.
+
+    Padding by repeating the last pair (the previous behaviour) cannot detect a stale
+    result: a mesh that replays set i-1 produces byte-identical output and passes.
+    Every set must differ from its neighbour for back-to-back runs to mean anything.
     """
+    if not sets:
+        raise ValueError("_pad_to needs at least one real set")
+    dim = sets[0][0].shape[0]
     while len(sets) < target:
-        sets.append(sets[-1])
+        np.random.seed(9000 + len(sets))
+        A = np.random.uniform(-1, 1, (dim, dim)).astype(np.float32)
+        B = np.random.uniform(-1, 1, (dim, dim)).astype(np.float32)
+        sets.append((A, B))
     return sets[:target]
 
 

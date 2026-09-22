@@ -5,11 +5,14 @@ module TB_SystolicMesh;
   localparam DATA_WIDTH = 32;
   localparam CLK_PERIOD = 10;
 
-  localparam MATRIX_SIZE = 8;
-  localparam TILE_SIZE = 4;
+  localparam MATRIX_SIZE = 16;
+  localparam TILE_SIZE = 2;
   localparam SRAM_SIZE = MATRIX_SIZE * MATRIX_SIZE;
 
-  localparam int NUM_TEST_SETS = 1;
+  localparam int NUM_TEST_SETS = 5;
+
+  // Reset once at time zero only. Resetting per set hides every re-arm defect.
+  localparam bit B2B_MODE = 1'b1;
 
   // Tolerance Settings
   localparam TOLERANCE_MODE = "RELATIVE";  // "ABSOLUTE", "RELATIVE", or "BOTH"
@@ -301,7 +304,7 @@ module TB_SystolicMesh;
       $display("=========================================");
       $display("  Inputs: %s, %s", f_a, f_b);
 
-      apply_reset();
+      if (!B2B_MODE || set_id == 0) apply_reset();
 
       fork
         load_west_queue(f_a);
