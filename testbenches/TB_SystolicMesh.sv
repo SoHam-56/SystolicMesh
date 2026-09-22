@@ -6,13 +6,16 @@ module TB_SystolicMesh;
   localparam CLK_PERIOD = 10;
 
   localparam MATRIX_SIZE = 16;
-  localparam TILE_SIZE = 2;
+  localparam TILE_SIZE = 4;
   localparam SRAM_SIZE = MATRIX_SIZE * MATRIX_SIZE;
 
   localparam int NUM_TEST_SETS = 5;
 
   // Reset once at time zero only. Resetting per set hides every re-arm defect.
   localparam bit B2B_MODE = 1'b1;
+
+  // A matmul is ~120 cycles at N=16; 500k made every hung set a 20-minute wait.
+  localparam int TIMEOUT_CYCLES = 20_000;
 
   // Tolerance Settings
   localparam TOLERANCE_MODE = "RELATIVE";  // "ABSOLUTE", "RELATIVE", or "BOTH"
@@ -49,15 +52,21 @@ module TB_SystolicMesh;
   // Per-set cycle log (max NUM_TEST_SETS entries)
   longint                  set_cycles            [        0:255];
 
+  // complete is a level held through DONE, so it is still high from the previous set
+  // when start is pulsed. Stopping on the level made every set after the first
+  // measure 0 cycles; stop on its rising edge instead.
+  logic complete_d;
   always_ff @(posedge clk or negedge rstn) begin
     if (!rstn) begin
       cycle_count <= 0;
       counting    <= 0;
+      complete_d  <= 0;
     end else begin
+      complete_d <= complete;
       if (start_mult) begin  // latch start — begin counting next cycle
         cycle_count <= 0;
         counting    <= 1;
-      end else if (complete) begin  // stop on completion
+      end else if (counting && complete && !complete_d) begin  // stop on completion edge
         counting <= 0;
       end else if (counting) begin
         cycle_count <= cycle_count + 1;
@@ -321,10 +330,15 @@ module TB_SystolicMesh;
       // Timeout protection
       fork
         begin
+          // complete is a level that stays high while the mesh sits in DONE, so it
+          // is still asserted from the previous set when start is pulsed. Wait for
+          // the mesh to leave DONE first, otherwise this returns immediately and the
+          // results are read before the new matmul has run.
+          wait (!complete);
           wait (complete);
         end
         begin
-          repeat (500000) @(posedge clk);
+          repeat (TIMEOUT_CYCLES) @(posedge clk);
           if (!complete) begin
             $display("  [FATAL] Timeout waiting for completion signal!");
             $finish;
