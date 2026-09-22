@@ -176,7 +176,7 @@ module TB_SystolicMesh;
         $display("  [Error] Could not open WEST file: %s", filename);
         $finish;
       end
-      w_rst = 1;
+      w_rst = !B2B_MODE;  // back-to-back: the mesh must rewind its own pointer
       @(posedge clk);
       w_rst = 0;
       @(posedge clk);
@@ -207,7 +207,7 @@ module TB_SystolicMesh;
         $display("  [Error] Could not open NORTH file: %s", filename);
         $finish;
       end
-      n_rst = 1;
+      n_rst = !B2B_MODE;  // back-to-back: the mesh must rewind its own pointer
       @(posedge clk);
       n_rst = 0;
       @(posedge clk);
@@ -296,6 +296,7 @@ module TB_SystolicMesh;
   task execute_test_set(input int set_id);
     string f_a, f_b, f_c;
     int set_errors;
+    bit load_empty;
     longint cycles_taken;
     begin
       if (NUM_TEST_SETS == 1) begin
@@ -321,6 +322,10 @@ module TB_SystolicMesh;
       join
 
       repeat (10) @(posedge clk);
+
+      // sienna_top refuses to start on an empty queue, so a loaded queue reading empty is a failure.
+      load_empty = w_empty || n_empty;
+      if (load_empty) $display("  [FAIL] Queue reads empty after load (west=%0b north=%0b)", w_empty, n_empty);
 
       $display("  [Action] Starting Matrix Mult...");
       start_mult = 1;
@@ -357,6 +362,7 @@ module TB_SystolicMesh;
 
       $display("  [Action] Processing Complete. Verifying...");
       verify_results(f_c, set_errors);
+      if (load_empty) set_errors++;
 
       total_sets_run++;
       if (set_errors == 0) sets_passed++;
