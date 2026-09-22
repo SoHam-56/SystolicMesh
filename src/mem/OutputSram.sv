@@ -12,6 +12,7 @@ module OutputSram #(
     input logic [DATA_WIDTH-1:0] data_i [0:N-1],
     input logic [N-1:0] drain_i,
     input logic matrix_mult_complete_i,
+    input logic rearm_i,                // clears a finished collection for the next matmul
 
     // SRAM read interface
     input logic read_enable_i,
@@ -91,6 +92,9 @@ module OutputSram #(
             COMPLETE: begin
                 collection_complete_o = 1'b1;
                 collection_active_o = 1'b0;
+                // Without this exit the flag sticks until reset and every later
+                // matmul sees a collection that already finished.
+                if (rearm_i) next_collection_state = IDLE;
             end
             
             default: next_collection_state = IDLE;

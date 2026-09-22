@@ -9,6 +9,7 @@ module SystolicArray #(
     input logic clk_i,
     input logic rstn_i,
     input logic start_matrix_mult_i,
+    input logic rearm_i,
 
     input logic                  north_write_enable_i,
     input logic [DATA_WIDTH-1:0] north_write_data_i,
@@ -127,6 +128,7 @@ module SystolicArray #(
       .data_i                (east_o),
       .drain_i               (drain_o),
       .matrix_mult_complete_i(matrix_mult_complete_o),
+      .rearm_i               (rearm_i),
 
       .read_enable_i(read_enable_i),
       .read_addr_i  (read_addr_i),

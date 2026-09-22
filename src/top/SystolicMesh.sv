@@ -122,6 +122,16 @@ module SystolicMesh #(
     endcase
   end
 
+  // Registered re-arm. Driving rearm_i straight from ctrl_reset_all closes a
+  // combinational loop: collection_complete_o -> all_tiles_collected -> the FSM
+  // that produces ctrl_reset_all. RESET_SEQ is followed by BROADCAST, so a
+  // one-cycle-late clear still lands long before WAIT_TILES samples the flag.
+  logic rearm_q;
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) rearm_q <= 1'b0;
+    else rearm_q <= ctrl_reset_all;
+  end
+
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] load_we_A, load_we_B;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][DATA_WIDTH-1:0] load_data_A, load_data_B;
   logic tiles_global_start;
@@ -186,7 +196,11 @@ module SystolicMesh #(
       .read_valid_o(read_valid_o)
   );
 
-  assign collection_complete_o = all_reducers_done;
+  // reducer_done holds from the previous matmul until its reduce pulse, so an ungated
+  // all_reducers_done lets a new matmul's consumer see "complete" before it has run.
+  // DONE still overlaps the start cycle by one, so drop the flag while start is asserted.
+  assign collection_complete_o = all_reducers_done && (current_state == DONE)
+                                 && !start_matrix_mult_i;
   assign collection_active_o   = (current_state == WAIT_REDUCE);
 
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0]                 t_ren;
@@ -212,6 +226,7 @@ module SystolicMesh #(
             .clk_i(clk_i),
             .rstn_i(rstn_i),
             .start_i(ctrl_reduce_pulse),
+            .rearm_i(rearm_q),
             .tile_data_i(t_data[i][j]),
             .tile_valid_i(t_valid[i][j]),
             .tile_ren_o(t_ren[i][j]),
@@ -234,6 +249,7 @@ module SystolicMesh #(
               .clk_i(clk_i),
               .rstn_i(rstn_i),
               .start_matrix_mult_i(tiles_global_start),
+              .rearm_i(rearm_q),
               .west_write_enable_i(load_we_A[i][k]),
               .west_write_data_i(load_data_A[i][k]),
               .west_write_reset_i(ctrl_reset_all),
