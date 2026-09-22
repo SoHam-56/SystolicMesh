@@ -38,19 +38,21 @@ module SystolicMesh #(
   logic [DATA_WIDTH-1:0] mem_A[0:GLOBAL_ELEMENTS-1];
   logic [DATA_WIDTH-1:0] mem_B[0:GLOBAL_ELEMENTS-1];
   logic [$clog2(GLOBAL_ELEMENTS):0] ptr_A, ptr_B;
+  logic ctrl_reset_all;  // mesh FSM re-arm, driven below
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
       ptr_A <= '0;
       ptr_B <= '0;
     end else begin
-      if (west_write_reset_i) ptr_A <= '0;
-      if (north_write_reset_i) ptr_B <= '0;
-      if (west_write_enable_i) begin
+      // Rewind once a set is accepted; unrewound, the pointer wraps and reads back as empty.
+      if (west_write_reset_i || ctrl_reset_all) ptr_A <= '0;
+      else if (west_write_enable_i && ptr_A < GLOBAL_ELEMENTS) begin
         mem_A[ptr_A] <= west_write_data_i;
         ptr_A <= ptr_A + 1;
       end
-      if (north_write_enable_i) begin
+      if (north_write_reset_i || ctrl_reset_all) ptr_B <= '0;
+      else if (north_write_enable_i && ptr_B < GLOBAL_ELEMENTS) begin
         mem_B[ptr_B] <= north_write_data_i;
         ptr_B <= ptr_B + 1;
       end
@@ -75,7 +77,7 @@ module SystolicMesh #(
   logic all_tiles_collected;
   logic all_reducers_done;
 
-  logic ctrl_reset_all, ctrl_load_en, ctrl_fire_pulse, ctrl_reduce_pulse, ctrl_done_signal;
+  logic ctrl_load_en, ctrl_fire_pulse, ctrl_reduce_pulse, ctrl_done_signal;
 
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] tile_col_done;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] tile_col_active;
