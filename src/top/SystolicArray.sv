@@ -102,6 +102,7 @@ module SystolicArray #(
   ) systolic_array_inst (
       .clk_i (clk_i),
       .rstn_i(rstn_i),
+      .rearm_i(rearm_i),
 
       .north_i(weight_in_north),
       .west_i (data_in_west),

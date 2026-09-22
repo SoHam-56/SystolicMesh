@@ -6,6 +6,7 @@ module PEMesh #(
 ) (
     input logic clk_i,
     input logic rstn_i,
+    input logic rearm_i,  // clears the finished-matmul latches for the next set
 
     input logic [DATA_WIDTH-1:0] north_i[0:N-1],  // Data inputs (top row - North boundary)
     input logic [DATA_WIDTH-1:0] west_i [0:N-1],  // Weight inputs (left column - West boundary)
@@ -191,6 +192,13 @@ module PEMesh #(
   // Done logic: Monitor bottom-right PE (PE[N-1][N-1])
   always @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
+      last_element_seen <= 1'b0;
+      waiting_for_passthrough <= 1'b0;
+      done_o <= 1'b0;
+    end else if (rearm_i) begin
+      // Both latches are one-shot. Left set, the last-element detect never fires
+      // again and done_o never falls, so drain_pending never sees another rising
+      // edge and the drain wave never runs for any later matmul.
       last_element_seen <= 1'b0;
       waiting_for_passthrough <= 1'b0;
       done_o <= 1'b0;
