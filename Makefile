@@ -39,8 +39,11 @@ TESTBENCH = $(TOP_MODULE).sv
 VERILATOR_DIR = $(PRJ_DIR)/Verilator
 VCS_DIR = $(PRJ_DIR)/VCS
 
+# Waveforms cost ~100 extra translation units and dominate build time. TRACE=0 skips
+# them; `make wave` needs TRACE=1, which is the default.
+TRACE ?= 1
+
 VERILATOR_FLAGS = \
-	--trace \
 	--timing \
 	--top-module $(TOP_MODULE) \
 	--threads 8 \
@@ -52,6 +55,10 @@ VERILATOR_FLAGS = \
 	--Wno-WIDTHTRUNC \
 	--Wno-WIDTHEXPAND \
 	--Wno-WIDTHCONCAT
+
+ifeq ($(TRACE),1)
+VERILATOR_FLAGS += --trace
+endif
 
 VCS_FLAGS = \
 	-full64 \
