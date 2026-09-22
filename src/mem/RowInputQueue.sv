@@ -95,6 +95,12 @@ module RowInputQueue #(
       if (start_i && !queue_active) begin
         queue_active <= 1'b1;
         first_data_sent <= 1'b0;
+        // Read side must return to its reset position. Left alone, pe_data_count
+        // stays at N and no element is ever read again.
+        for (int i = 0; i < N; i++) begin
+          pe_data_count[i] <= '0;
+          read_addr[i] <= i * N;
+        end
       end
 
       if (queue_active && !first_data_sent) begin
