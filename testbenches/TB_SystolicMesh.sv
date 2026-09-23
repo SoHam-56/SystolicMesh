@@ -495,6 +495,90 @@ module TB_SystolicMesh;
     if (coll_complete) $display("  [FAIL] Release with no result outstanding raised collection_complete_o");
   endtask
 
+  // ── Staging overrun: writes and a start while input_ready_o is low ─────────
+  // The consumer withholds release until both result banks and both staging banks are full.
+  task automatic staging_overrun_test();
+    string f_a, f_b, f_c;
+    int errs;
+    $display("\n[STAGE] STAGING OVERRUN: queue four sets unreleased, then write and start while not ready");
+    n_launched  = 0;
+    n_completed = 0;
+    count_bad   = 0;
+    streaming   = 1;
+    fork
+      begin
+        for (int j = 0; j < 4; j++) begin
+          set_files(j % NUM_TEST_SETS, f_a, f_b, f_c);
+          while (!in_ready) @(posedge clk);
+          fork
+            load_west_queue(f_a);
+            load_north_queue(f_b);
+          join
+          start_mult = 1;
+          @(posedge clk);
+          start_mult = 0;
+          @(posedge clk);
+        end
+        repeat (400) @(posedge clk);  // two results fill both result banks, two sets stay staged
+        if (in_ready) $display("  [FAIL] Overrun not reached: input_ready_o high with both banks full");
+        set_files(4 % NUM_TEST_SETS, f_a, f_b, f_c);
+        fork
+          load_west_queue(f_a);
+          load_north_queue(f_b);
+        join
+        start_mult = 1;
+        @(posedge clk);
+        start_mult = 0;
+        repeat (2) @(posedge clk);
+        if (int'(dut.ptr_A) != 0 || int'(dut.ptr_B) != 0 || in_ready)
+          $display("  [FAIL] Writes or a start were taken while input_ready_o was low: ptr_A=%0d ptr_B=%0d",
+                   dut.ptr_A, dut.ptr_B);
+        else $display("  [Overrun] 256 writes and a start while not ready were all ignored");
+        for (int j = 0; j < 4; j++) begin
+          set_files(j % NUM_TEST_SETS, f_a, f_b, f_c);
+          while (!coll_complete) @(posedge clk);
+          verify_results(f_c, errs);
+          total_sets_run++;
+          if (errs == 0) sets_passed++;
+          else sets_failed++;
+          rel = 1;
+          @(posedge clk);
+          rel = 0;
+          @(posedge clk);
+        end
+        set_files(4 % NUM_TEST_SETS, f_a, f_b, f_c);  // a proper load after the overrun must land intact
+        while (!in_ready) @(posedge clk);
+        fork
+          load_west_queue(f_a);
+          load_north_queue(f_b);
+        join
+        start_mult = 1;
+        @(posedge clk);
+        start_mult = 0;
+        @(posedge clk);
+        while (!coll_complete) @(posedge clk);
+        verify_results(f_c, errs);
+        total_sets_run++;
+        if (errs == 0) sets_passed++;
+        else sets_failed++;
+        rel = 1;
+        @(posedge clk);
+        rel = 0;
+        @(posedge clk);
+      end
+      begin
+        repeat (TIMEOUT_CYCLES * 6) @(posedge clk);
+        $display("  [FATAL] Timeout in the staging overrun test");
+        $finish;
+      end
+    join_any
+    disable fork;
+    streaming = 0;
+    if (count_bad || n_launched != 5 || n_completed != 5)
+      $display("  [FAIL] Overrun: %0d sets launched and %0d completed, expected 5 each", n_launched,
+               n_completed);
+  endtask
+
   // ── Top-level stimulus ────────────────────────────────────────────────────
   initial begin
     $dumpfile("TB_SystolicMesh.vcd");
@@ -523,6 +607,7 @@ module TB_SystolicMesh;
       $display("  [Serial] %0d sets in %0d cycles", NUM_TEST_SETS, ($time - t_serial) / CLK_PERIOD);
     end
     stream_all_sets();
+    staging_overrun_test();
 
     // ── Final report ───────────────────────────────────────────────────────
     $display("\n##############################################");
