@@ -41,6 +41,8 @@ module SystolicMesh #(
   logic [DATA_WIDTH-1:0] mem_B[0:GLOBAL_ELEMENTS-1];
   logic [$clog2(GLOBAL_ELEMENTS):0] ptr_A, ptr_B;
   logic ctrl_reset_all;  // mesh FSM re-arm, driven below
+  logic [1:0] out_full;  // per result bank: holds a finished, unreleased result
+  logic out_wr, out_rd;  // bank the reducers write, bank the consumer reads
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -92,7 +94,7 @@ module SystolicMesh #(
 
   logic set_done;  // one cycle: this set's reduce has finished
   assign set_done = (current_state == WAIT_REDUCE) && all_reducers_done;
-  assign input_ready_o = (current_state == IDLE) || (current_state == DONE);  // stub until banks exist
+  assign input_ready_o = ((current_state == IDLE) || (current_state == DONE)) && !out_full[out_wr];  // stub until staging banks exist
 
   always_comb begin
     next_state = current_state;
@@ -103,7 +105,7 @@ module SystolicMesh #(
     ctrl_done_signal = 0;
 
     case (current_state)
-      IDLE:        if (start_matrix_mult_i) next_state = RESET_SEQ;
+      IDLE:        if (start_matrix_mult_i && !out_full[out_wr]) next_state = RESET_SEQ;
       RESET_SEQ: begin
         ctrl_reset_all = 1;
         next_state = BROADCAST;
@@ -124,10 +126,28 @@ module SystolicMesh #(
       WAIT_REDUCE: if (all_reducers_done) next_state = DONE;
       DONE: begin
         ctrl_done_signal = 1;
-        if (start_matrix_mult_i) next_state = RESET_SEQ;
+        if (start_matrix_mult_i && !out_full[out_wr]) next_state = RESET_SEQ;
       end
       default:     next_state = IDLE;
     endcase
+  end
+
+  // Result banks: set by a finished reduce, cleared by the consumer's release.
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      out_full <= '0;
+      out_wr   <= 1'b0;
+      out_rd   <= 1'b0;
+    end else begin
+      if (set_done) begin
+        out_full[out_wr] <= 1'b1;
+        out_wr <= ~out_wr;
+      end
+      if (result_release_i && out_full[out_rd]) begin
+        out_full[out_rd] <= 1'b0;
+        out_rd <= ~out_rd;
+      end
+    end
   end
 
   // Registered re-arm. Driving rearm_i straight from ctrl_reset_all closes a
@@ -187,28 +207,29 @@ module SystolicMesh #(
   logic [NUM_TILES-1:0]                 sram_we_agg;
   logic [NUM_TILES-1:0][          31:0] sram_addr_agg;
   logic [NUM_TILES-1:0][DATA_WIDTH-1:0] sram_data_agg;
+  logic [NUM_TILES-1:0][          31:0] sram_addr_bank;
+
+  always_comb
+    for (int p = 0; p < NUM_TILES; p++)
+      sram_addr_bank[p] = sram_addr_agg[p] + (out_wr ? GLOBAL_ELEMENTS : 0);
 
   MeshOutputSram #(
-      .DEPTH(GLOBAL_ELEMENTS),
+      .DEPTH(2 * GLOBAL_ELEMENTS),
       .DATA_WIDTH(DATA_WIDTH),
       .NUM_PORTS(NUM_TILES)
   ) output_mem (
       .clk_i(clk_i),
       .rstn_i(rstn_i),
       .we_i(sram_we_agg),
-      .waddr_i(sram_addr_agg),
+      .waddr_i(sram_addr_bank),
       .wdata_i(sram_data_agg),
-      .read_enable_i(read_enable_i),
-      .read_addr_i(read_addr_i),
+      .read_enable_i(read_enable_i && read_addr_i < GLOBAL_ELEMENTS),
+      .read_addr_i(read_addr_i + (out_rd ? GLOBAL_ELEMENTS : 0)),
       .read_data_o(read_data_o),
       .read_valid_o(read_valid_o)
   );
 
-  // reducer_done holds from the previous matmul until its reduce pulse, so an ungated
-  // all_reducers_done lets a new matmul's consumer see "complete" before it has run.
-  // DONE still overlaps the start cycle by one, so drop the flag while start is asserted.
-  assign collection_complete_o = all_reducers_done && (current_state == DONE)
-                                 && !start_matrix_mult_i;
+  assign collection_complete_o = out_full[out_rd];  // cleared by release, never sticky
   assign collection_active_o   = (current_state == WAIT_REDUCE);
 
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0]                 t_ren;
