@@ -110,6 +110,19 @@ module TB_SystolicMesh;
     forever #(CLK_PERIOD / 2) clk = ~clk;
   end
 
+  // Manual binary32 decode. $signed() and $bitstoshortreal both leave the bit pattern as an integer
+  // under Verilator, which turns a 1% bound into roughly a factor of two.
+  function automatic real f32(input logic [31:0] b);
+    int  e;
+    real m, v;
+    e = int'(b[30:23]);
+    m = real'(longint'(b[22:0])) / 8388608.0;
+    if (e == 255) v = 1.0e38;                         // Inf / NaN, clamped so any finite compare fails
+    else if (e == 0) v = 0.0;                         // zero / flushed subnormal
+    else v = (1.0 + m) * (2.0 ** (e - 127));
+    return b[31] ? -v : v;
+  endfunction
+
   // ── Tolerance check ───────────────────────────────────────────────────────
   function automatic logic check_tolerance(
       input [DATA_WIDTH-1:0] expected, input [DATA_WIDTH-1:0] actual, output string tolerance_info);
@@ -117,8 +130,8 @@ module TB_SystolicMesh;
     real abs_diff, rel_diff;
     logic abs_ok, rel_ok, result;
 
-    expected_real = $signed(expected);
-    actual_real = $signed(actual);
+    expected_real = f32(expected);
+    actual_real = f32(actual);
 
     abs_diff = (expected_real > actual_real) ?
                (expected_real - actual_real) : (actual_real - expected_real);
@@ -146,6 +159,19 @@ module TB_SystolicMesh;
     );
     return result;
   endfunction
+
+  // Checker self-test: a loose or broken compare must fail the run before any result is trusted.
+  initial begin
+    string st_info;
+    if (!check_tolerance(32'h3f800000, 32'h3f800003, st_info) ||   // 1.0 vs 1.0 + 3 ulp: pass
+        check_tolerance(32'h3f800000, 32'h40000000, st_info) ||    // 1.0 vs 2.0: fail
+        check_tolerance(32'h3f800000, 32'h3f7ae148, st_info) ||    // 1.0 vs 0.98: fail
+        check_tolerance(32'h3f800000, 32'hbf800000, st_info) ||    // 1.0 vs -1.0: fail
+        check_tolerance(32'hbf000000, 32'hbd4ccccd, st_info)) begin // -0.5 vs -0.05: fail
+      $display("[FAIL] Tolerance checker self-test failed; results cannot be trusted");
+      $finish;
+    end
+  end
 
   // ── Reset ─────────────────────────────────────────────────────────────────
   task apply_reset();
