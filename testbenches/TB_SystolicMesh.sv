@@ -521,7 +521,7 @@ module TB_SystolicMesh;
           start_mult = 0;
           @(posedge clk);
         end
-        repeat (400) @(posedge clk);  // two results fill both result banks, two sets stay staged
+        for (int w = 0; w < TIMEOUT_CYCLES && in_ready; w++) @(posedge clk);  // two results fill both banks, two sets stay staged
         if (in_ready) $display("  [FAIL] Overrun not reached: input_ready_o high with both banks full");
         set_files(4 % NUM_TEST_SETS, f_a, f_b, f_c);
         fork
