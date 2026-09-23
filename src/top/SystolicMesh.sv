@@ -316,4 +316,21 @@ module SystolicMesh #(
     end
   endgenerate
 
+`ifndef SYNTHESIS
+  // Handshake invariants; live only with --assert.
+  a_result_bank_free: assert property (@(posedge clk_i) disable iff (!rstn_i) set_done |-> !out_full[out_wr])
+    else $error("SystolicMesh: a reduce finished into a full result bank");
+  a_staging_bank_full: assert property (@(posedge clk_i) disable iff (!rstn_i) bcast_release |-> in_full[in_rd])
+    else $error("SystolicMesh: BROADCAST copied an empty staging bank");
+  a_launch_ready: assert property (@(posedge clk_i) disable iff (!rstn_i)
+                                   ctrl_reset_all |-> (in_full[in_rd] && !out_full[out_wr]))
+    else $error("SystolicMesh: launched without a full staging bank and a free result bank");
+  a_read_outstanding: assert property (@(posedge clk_i) disable iff (!rstn_i) read_enable_i |-> out_full[out_rd])
+    else $error("SystolicMesh: result read with no result outstanding");
+`ifdef ASSERT_SELFTEST
+  a_selftest: assert property (@(posedge clk_i) disable iff (!rstn_i) 1'b0)
+    else $error("SystolicMesh: assertion self-test fired, so assertions are live");
+`endif
+`endif
+
 endmodule

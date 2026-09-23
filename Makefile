@@ -45,6 +45,7 @@ TRACE ?= 1
 
 VERILATOR_FLAGS = \
 	--timing \
+	--assert \
 	--top-module $(TOP_MODULE) \
 	--threads 8 \
 	--build-jobs $(shell nproc) \
@@ -59,6 +60,9 @@ VERILATOR_FLAGS = \
 ifeq ($(TRACE),1)
 VERILATOR_FLAGS += --trace
 endif
+
+# One-off defines, e.g. EXTRA_FLAGS=-DASSERT_SELFTEST
+VERILATOR_FLAGS += $(EXTRA_FLAGS)
 
 VCS_FLAGS = \
 	-full64 \
