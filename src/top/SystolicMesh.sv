@@ -23,6 +23,8 @@ module SystolicMesh #(
     output logic matrix_mult_complete_o,
     output logic collection_complete_o,
     output logic collection_active_o,
+    input  logic result_release_i,  // consumer finished reading the oldest result
+    output logic input_ready_o,     // a staging bank is free for the host
 
     input  logic                  read_enable_i,
     input  logic [          31:0] read_addr_i,
@@ -87,6 +89,10 @@ module SystolicMesh #(
   assign loading_done = (load_idx >= TILE_ELEMENTS - 1);
   assign all_tiles_collected = &tile_col_done;
   assign all_reducers_done = &reducer_done;
+
+  logic set_done;  // one cycle: this set's reduce has finished
+  assign set_done = (current_state == WAIT_REDUCE) && all_reducers_done;
+  assign input_ready_o = (current_state == IDLE) || (current_state == DONE);  // stub until banks exist
 
   always_comb begin
     next_state = current_state;

@@ -28,6 +28,8 @@ module TB_SystolicMesh;
   reg n_we, w_we, n_rst, w_rst;
   reg [DATA_WIDTH-1:0] n_data, w_data;
   wire n_empty, w_empty, complete;
+  wire in_ready, coll_complete;
+  reg  rel;
 
   reg                      r_en;
   reg     [          31:0] r_addr;
@@ -95,8 +97,10 @@ module TB_SystolicMesh;
       .north_queue_empty_o(n_empty),
       .west_queue_empty_o(w_empty),
       .matrix_mult_complete_o(complete),
-      .collection_complete_o(),
+      .collection_complete_o(coll_complete),
       .collection_active_o(),
+      .result_release_i(rel),
+      .input_ready_o(in_ready),
 
       .read_enable_i(r_en),
       .read_addr_i  (r_addr),
@@ -186,6 +190,7 @@ module TB_SystolicMesh;
       w_data     = 0;
       r_en       = 0;
       r_addr     = 0;
+      rel        = 0;
       repeat (5) @(posedge clk);
       rstn = 1;
       repeat (5) @(posedge clk);
@@ -318,6 +323,19 @@ module TB_SystolicMesh;
     end
   endtask
 
+  // ── Per-set stimulus file names ───────────────────────────────────────────
+  task automatic set_files(input int s, output string f_a, output string f_b, output string f_c);
+    if (NUM_TEST_SETS == 1) begin
+      f_a = "matrixA.mem";
+      f_b = "matrixB.mem";
+      f_c = "matrixC.mem";
+    end else begin
+      f_a = $sformatf("matrixA_%0d.mem", s);
+      f_b = $sformatf("matrixB_%0d.mem", s);
+      f_c = $sformatf("matrixC_%0d.mem", s);
+    end
+  endtask
+
   // ── Single test set ───────────────────────────────────────────────────────
   task execute_test_set(input int set_id);
     string f_a, f_b, f_c;
@@ -325,15 +343,7 @@ module TB_SystolicMesh;
     bit load_empty;
     longint cycles_taken;
     begin
-      if (NUM_TEST_SETS == 1) begin
-        f_a = "matrixA.mem";
-        f_b = "matrixB.mem";
-        f_c = "matrixC.mem";
-      end else begin
-        f_a = $sformatf("matrixA_%0d.mem", set_id);
-        f_b = $sformatf("matrixB_%0d.mem", set_id);
-        f_c = $sformatf("matrixC_%0d.mem", set_id);
-      end
+      set_files(set_id, f_a, f_b, f_c);
 
       $display("\n=========================================");
       $display("STARTING TEST SET %0d", set_id);
@@ -389,6 +399,10 @@ module TB_SystolicMesh;
       $display("  [Action] Processing Complete. Verifying...");
       verify_results(f_c, set_errors);
       if (load_empty) set_errors++;
+      rel = 1;  // hand the result bank back
+      @(posedge clk);
+      rel = 0;
+      @(posedge clk);
 
       total_sets_run++;
       if (set_errors == 0) sets_passed++;
@@ -396,6 +410,84 @@ module TB_SystolicMesh;
 
       repeat (20) @(posedge clk);
     end
+  endtask
+
+  // ── Streaming: host, mesh and consumer run concurrently ───────────────────
+  // Sampled on the falling edge, from registered state only: TB inputs set after a rising
+  // edge are already taken at that edge, so a combinational view of start is a cycle late.
+  int  in_overlap = 0, out_overlap = 0, n_launched = 0, n_completed = 0;
+  bit  streaming = 0, count_bad = 0;
+  wire mesh_busy = (int'(dut.current_state) != 0) && (int'(dut.current_state) != 7);  // not IDLE, not DONE
+  initial forever begin
+    @(negedge clk);
+    if (streaming) begin
+      if ((w_we || n_we) && mesh_busy) in_overlap++;
+      if (r_en && mesh_busy) out_overlap++;
+      if (int'(dut.current_state) == 1) n_launched++;  // RESET_SEQ lasts one cycle per set
+      if (dut.set_done) n_completed++;
+      if (n_completed > n_launched) count_bad = 1;
+    end
+  end
+
+  task automatic stream_all_sets();
+    longint t0;
+    $display("\n[STAGE] STREAMING: %0d sets, host / mesh / consumer concurrent", NUM_TEST_SETS);
+    streaming = 1;
+    t0 = $time;
+    fork
+      begin
+        fork
+          begin : producer
+            string f_a, f_b, f_c;
+            for (int s = 0; s < NUM_TEST_SETS; s++) begin
+              set_files(s, f_a, f_b, f_c);
+              while (!in_ready) @(posedge clk);
+              fork
+                load_west_queue(f_a);
+                load_north_queue(f_b);
+              join
+              if (!in_ready) $display("  [FAIL] Start pulsed while input_ready_o is low");
+              start_mult = 1;
+              @(posedge clk);
+              start_mult = 0;
+              @(posedge clk);  // let the bank flip land before sampling in_ready again
+            end
+          end
+          begin : consumer
+            string f_a, f_b, f_c;
+            int errs;
+            for (int s = 0; s < NUM_TEST_SETS; s++) begin
+              set_files(s, f_a, f_b, f_c);
+              while (!coll_complete) @(posedge clk);
+              $display("  [Stream] set %0d readable @%0t", s, $time);
+              verify_results(f_c, errs);
+              total_sets_run++;
+              if (errs == 0) sets_passed++;
+              else sets_failed++;
+              rel = 1;
+              @(posedge clk);
+              rel = 0;
+              @(posedge clk);
+            end
+          end
+        join
+      end
+      begin : watchdog
+        repeat (TIMEOUT_CYCLES * NUM_TEST_SETS) @(posedge clk);
+        $display("  [FATAL] Timeout in the streaming pass");
+        $finish;
+      end
+    join_any
+    disable fork;
+    streaming = 0;
+    $display("  [Stream] %0d sets in %0d cycles", NUM_TEST_SETS, ($time - t0) / CLK_PERIOD);
+    $display("  [Stream] host loading while mesh busy: %0d cycles", in_overlap);
+    $display("  [Stream] consumer reading while mesh busy: %0d cycles", out_overlap);
+    if (in_overlap == 0) $display("  [FAIL] Overlap: host never loaded a set while the mesh was busy");
+    if (out_overlap == 0) $display("  [FAIL] Overlap: consumer never read a result while the mesh was busy");
+    if (count_bad || n_completed != NUM_TEST_SETS || n_launched != NUM_TEST_SETS)
+      $display("  [FAIL] %0d sets launched and %0d completed, expected %0d each", n_launched,
+               n_completed, NUM_TEST_SETS);
   endtask
 
   // ── Top-level stimulus ────────────────────────────────────────────────────
@@ -419,9 +511,13 @@ module TB_SystolicMesh;
     end
     $display("----------------------------------------------");
 
-    for (int i = 0; i < NUM_TEST_SETS; i++) begin
-      execute_test_set(i);
+    begin
+      longint t_serial;
+      t_serial = $time;
+      for (int i = 0; i < NUM_TEST_SETS; i++) execute_test_set(i);
+      $display("  [Serial] %0d sets in %0d cycles", NUM_TEST_SETS, ($time - t_serial) / CLK_PERIOD);
     end
+    stream_all_sets();
 
     // ── Final report ───────────────────────────────────────────────────────
     $display("\n##############################################");
