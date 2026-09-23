@@ -68,6 +68,13 @@ import struct
 
 import numpy as np
 
+# SIENNA_SEED shifts every generator seed; unset reproduces the fixed stimulus.
+_SEED_OFFSET = int(os.environ.get("SIENNA_SEED", "0"))
+
+
+def _seed(s: int) -> None:
+    np.random.seed(s + _SEED_OFFSET)
+
 from matmul_tests import write_mem, pow2_tile_sizes, _ref_matmul
 
 # Fixed number of test sets written by every conv generator.
@@ -147,7 +154,7 @@ def _debug_table(tag: str, C: np.ndarray, patches: list, P: int, out_side: int) 
 def _basic_pair(img_size: int, K: int, seed: int) -> tuple:
     """Build one (A, B) im2col pair for a non-overlapping-stride test."""
     P           = K * K
-    np.random.seed(seed)
+    _seed(seed)
     image       = np.random.uniform(-1, 1, (img_size, img_size)).astype(np.float32)
     kernel      = np.random.uniform(-1, 1, (K, K)).astype(np.float32)
     patches, _  = _im2col_patches(image, K, K)
@@ -176,7 +183,7 @@ def gen_conv_zero_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
     img  = K * K
     sets = []
     for i in range(3):
-        np.random.seed(800 + i)
+        _seed(800 + i)
         image   = np.random.uniform(-1, 1, (img, img)).astype(np.float32)
         patches, _ = _im2col_patches(image, K, K)
         A = np.stack(patches).astype(np.float32)
@@ -191,7 +198,7 @@ def gen_conv_ones_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
     img  = K * K
     sets = []
     for i in range(3):
-        np.random.seed(900 + i)
+        _seed(900 + i)
         image   = np.random.uniform(-1, 1, (img, img)).astype(np.float32)
         patches, _ = _im2col_patches(image, K, K)
         A = np.stack(patches).astype(np.float32)
@@ -209,7 +216,7 @@ def gen_conv_impulse_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
     k_vec[center] = 1.0
     sets = []
     for i in range(3):
-        np.random.seed(1000 + i)
+        _seed(1000 + i)
         image   = np.random.uniform(-1, 1, (img, img)).astype(np.float32)
         patches, _ = _im2col_patches(image, K, K)
         A = np.stack(patches).astype(np.float32)
@@ -232,7 +239,7 @@ def gen_conv_large_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
     img  = K * K
     sets = []
     for i in range(3):
-        np.random.seed(1200 + i)
+        _seed(1200 + i)
         image   = np.random.uniform(-1, 1, (img, img)).astype(np.float32)
         patches, _ = _im2col_patches(image, K, K)
         k_vec   = np.random.uniform(-10, 10, P).astype(np.float32)
@@ -265,7 +272,7 @@ def gen_conv_adv_stride(stim_dir: str, N: int,
     img_out  = K // 2 + 1                      # output map side
     img_size = (img_out - 1) * S + K           # smallest image giving img_out patches/side
 
-    np.random.seed(seed)
+    _seed(seed)
     image   = np.random.uniform(-1, 1, (img_size, img_size)).astype(np.float32)
     kernel  = np.random.uniform(-1, 1, (K, K)).astype(np.float32)
     k_vec   = kernel.flatten()
@@ -321,7 +328,7 @@ def gen_conv_adv_multi_out(stim_dir: str, N: int,
 
     sets = []
     for i in range(3):
-        np.random.seed(42 + i)
+        _seed(42 + i)
         image   = np.random.uniform(-1, 1, (img, img)).astype(np.float32)
         filters = np.random.uniform(-1, 1, (P, P)).astype(np.float32)
         patches, _ = _im2col_patches(image, K, K)
@@ -365,7 +372,7 @@ def gen_conv_adv_multi_in(stim_dir: str, N: int,
 
     sets = []
     for i in range(3):
-        np.random.seed(seed + i)
+        _seed(seed + i)
         image   = np.random.uniform(-1, 1, (IMG, IMG, C_IN)).astype(np.float32)
         filters = np.random.uniform(-1, 1, (N_OUT, C_IN, K, K)).astype(np.float32)
         patches, _ = _im2col_patches(image, K, STRIDE)

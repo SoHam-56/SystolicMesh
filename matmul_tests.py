@@ -34,6 +34,13 @@ import struct
 
 import numpy as np
 
+# SIENNA_SEED shifts every generator seed; unset reproduces the fixed stimulus.
+_SEED_OFFSET = int(os.environ.get("SIENNA_SEED", "0"))
+
+
+def _seed(s: int) -> None:
+    np.random.seed(s + _SEED_OFFSET)
+
 # Fixed number of test sets written by every matmul generator.
 # regression.py compiles the TB with NUM_TEST_SETS=MATMUL_NUM_SETS once per
 # tile and re-uses the binary for all matmul tests.
@@ -87,7 +94,7 @@ def _pad_to(sets: list, target: int) -> list:
         raise ValueError("_pad_to needs at least one real set")
     dim = sets[0][0].shape[0]
     while len(sets) < target:
-        np.random.seed(9000 + len(sets))
+        _seed(9000 + len(sets))
         A = np.random.uniform(-1, 1, (dim, dim)).astype(np.float32)
         B = np.random.uniform(-1, 1, (dim, dim)).astype(np.float32)
         sets.append((A, B))
@@ -112,7 +119,7 @@ def gen_mm_random(stim_dir: str, N: int) -> int:
     """5 random float32 matrix pairs, values in [-1, 1]."""
     sets = []
     for i in range(5):
-        np.random.seed(100 + i)
+        _seed(100 + i)
         A = np.random.uniform(-1, 1, (N, N)).astype(np.float32)
         B = np.random.uniform(-1, 1, (N, N)).astype(np.float32)
         sets.append((A, B))
@@ -123,7 +130,7 @@ def gen_mm_identity(stim_dir: str, N: int) -> int:
     """A @ I = A  — verifies no data corruption through the mesh."""
     sets = []
     for i in range(3):
-        np.random.seed(200 + i)
+        _seed(200 + i)
         A = np.random.uniform(-1, 1, (N, N)).astype(np.float32)
         sets.append((A, np.eye(N, dtype=np.float32)))
     return _write_all(_pad_to(sets, MATMUL_NUM_SETS), stim_dir)
@@ -133,7 +140,7 @@ def gen_mm_zero_b(stim_dir: str, N: int) -> int:
     """A @ 0 = 0  — verifies zero propagation, no spurious accumulation."""
     sets = []
     for i in range(3):
-        np.random.seed(300 + i)
+        _seed(300 + i)
         A = np.random.uniform(-1, 1, (N, N)).astype(np.float32)
         sets.append((A, np.zeros((N, N), dtype=np.float32)))
     return _write_all(_pad_to(sets, MATMUL_NUM_SETS), stim_dir)
@@ -149,7 +156,7 @@ def gen_mm_ones(stim_dir: str, N: int) -> int:
 
 def gen_mm_diagonal(stim_dir: str, N: int) -> int:
     """Diagonal A @ diagonal B = diag(d_a * d_b)  — tests sparse data flow."""
-    np.random.seed(400)
+    _seed(400)
     d_a = np.random.uniform(-2, 2, N).astype(np.float32)
     d_b = np.random.uniform(-2, 2, N).astype(np.float32)
     sets = [(np.diag(d_a), np.diag(d_b))]
@@ -160,7 +167,7 @@ def gen_mm_large_values(stim_dir: str, N: int) -> int:
     """Values near ±100  — stresses accumulator range without overflow."""
     sets = []
     for i in range(3):
-        np.random.seed(500 + i)
+        _seed(500 + i)
         A = np.random.uniform(-100, 100, (N, N)).astype(np.float32)
         B = np.random.uniform(-100, 100, (N, N)).astype(np.float32)
         sets.append((A, B))
@@ -171,7 +178,7 @@ def gen_mm_small_values(stim_dir: str, N: int) -> int:
     """Values near ±1e-6  — stresses underflow / denormal handling."""
     sets = []
     for i in range(3):
-        np.random.seed(600 + i)
+        _seed(600 + i)
         A = np.random.uniform(-1e-6, 1e-6, (N, N)).astype(np.float32)
         B = np.random.uniform(-1e-6, 1e-6, (N, N)).astype(np.float32)
         sets.append((A, B))
