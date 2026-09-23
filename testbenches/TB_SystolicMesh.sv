@@ -488,6 +488,11 @@ module TB_SystolicMesh;
     if (count_bad || n_completed != NUM_TEST_SETS || n_launched != NUM_TEST_SETS)
       $display("  [FAIL] %0d sets launched and %0d completed, expected %0d each", n_launched,
                n_completed, NUM_TEST_SETS);
+    rel = 1;  // nothing outstanding: must be ignored
+    @(posedge clk);
+    rel = 0;
+    repeat (2) @(posedge clk);
+    if (coll_complete) $display("  [FAIL] Release with no result outstanding raised collection_complete_o");
   endtask
 
   // ── Top-level stimulus ────────────────────────────────────────────────────

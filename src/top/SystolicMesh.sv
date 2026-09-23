@@ -37,28 +37,44 @@ module SystolicMesh #(
   localparam TILE_ELEMENTS = TILE_SIZE * TILE_SIZE;
   localparam NUM_TILES = TILES_PER_DIM * TILES_PER_DIM;
 
-  logic [DATA_WIDTH-1:0] mem_A[0:GLOBAL_ELEMENTS-1];
-  logic [DATA_WIDTH-1:0] mem_B[0:GLOBAL_ELEMENTS-1];
+  logic [DATA_WIDTH-1:0] mem_A[0:2*GLOBAL_ELEMENTS-1];
+  logic [DATA_WIDTH-1:0] mem_B[0:2*GLOBAL_ELEMENTS-1];
   logic [$clog2(GLOBAL_ELEMENTS):0] ptr_A, ptr_B;
+  logic [1:0] in_full;  // per staging bank: a started set not yet broadcast
+  logic in_wr, in_rd;  // bank the host writes, bank BROADCAST reads
+  logic start_accept, bcast_release;
+  assign input_ready_o = !in_full[in_wr];
+  assign start_accept  = start_matrix_mult_i && input_ready_o;
   logic ctrl_reset_all;  // mesh FSM re-arm, driven below
   logic [1:0] out_full;  // per result bank: holds a finished, unreleased result
   logic out_wr, out_rd;  // bank the reducers write, bank the consumer reads
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
-      ptr_A <= '0;
-      ptr_B <= '0;
+      ptr_A   <= '0;
+      ptr_B   <= '0;
+      in_full <= '0;
+      in_wr   <= 1'b0;
+      in_rd   <= 1'b0;
     end else begin
-      // Rewind once a set is accepted; unrewound, the pointer wraps and reads back as empty.
-      if (west_write_reset_i || ctrl_reset_all) ptr_A <= '0;
-      else if (west_write_enable_i && ptr_A < GLOBAL_ELEMENTS) begin
-        mem_A[ptr_A] <= west_write_data_i;
+      // Rewind as each set is accepted; unrewound, the pointer wraps and reads back as empty.
+      if (west_write_reset_i || start_accept) ptr_A <= '0;
+      else if (west_write_enable_i && input_ready_o && ptr_A < GLOBAL_ELEMENTS) begin
+        mem_A[int'(in_wr)*GLOBAL_ELEMENTS+int'(ptr_A)] <= west_write_data_i;
         ptr_A <= ptr_A + 1;
       end
-      if (north_write_reset_i || ctrl_reset_all) ptr_B <= '0;
-      else if (north_write_enable_i && ptr_B < GLOBAL_ELEMENTS) begin
-        mem_B[ptr_B] <= north_write_data_i;
+      if (north_write_reset_i || start_accept) ptr_B <= '0;
+      else if (north_write_enable_i && input_ready_o && ptr_B < GLOBAL_ELEMENTS) begin
+        mem_B[int'(in_wr)*GLOBAL_ELEMENTS+int'(ptr_B)] <= north_write_data_i;
         ptr_B <= ptr_B + 1;
+      end
+      if (start_accept) begin
+        in_full[in_wr] <= 1'b1;
+        in_wr <= ~in_wr;
+      end
+      if (bcast_release) begin
+        in_full[in_rd] <= 1'b0;
+        in_rd <= ~in_rd;
       end
     end
   end
@@ -89,12 +105,12 @@ module SystolicMesh #(
   integer load_idx;
 
   assign loading_done = (load_idx >= TILE_ELEMENTS - 1);
+  assign bcast_release = (current_state == BROADCAST) && loading_done;  // bank copied into the tiles
   assign all_tiles_collected = &tile_col_done;
   assign all_reducers_done = &reducer_done;
 
   logic set_done;  // one cycle: this set's reduce has finished
   assign set_done = (current_state == WAIT_REDUCE) && all_reducers_done;
-  assign input_ready_o = ((current_state == IDLE) || (current_state == DONE)) && !out_full[out_wr];  // stub until staging banks exist
 
   always_comb begin
     next_state = current_state;
@@ -105,7 +121,7 @@ module SystolicMesh #(
     ctrl_done_signal = 0;
 
     case (current_state)
-      IDLE:        if (start_matrix_mult_i && !out_full[out_wr]) next_state = RESET_SEQ;
+      IDLE:        if (in_full[in_rd] && !out_full[out_wr]) next_state = RESET_SEQ;
       RESET_SEQ: begin
         ctrl_reset_all = 1;
         next_state = BROADCAST;
@@ -126,7 +142,7 @@ module SystolicMesh #(
       WAIT_REDUCE: if (all_reducers_done) next_state = DONE;
       DONE: begin
         ctrl_done_signal = 1;
-        if (start_matrix_mult_i && !out_full[out_wr]) next_state = RESET_SEQ;
+        if (in_full[in_rd] && !out_full[out_wr]) next_state = RESET_SEQ;
       end
       default:     next_state = IDLE;
     endcase
@@ -189,14 +205,14 @@ module SystolicMesh #(
         for (i_L = 0; i_L < TILES_PER_DIM; i_L++) begin
           for (k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
             addr_calc = ((i_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((k_L * TILE_SIZE) + sub_c);
-            load_data_A[i_L][k_L] <= mem_A[addr_calc];
+            load_data_A[i_L][k_L] <= mem_A[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
             load_we_A[i_L][k_L]   <= 1;
           end
         end
         for (k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
           for (j_L = 0; j_L < TILES_PER_DIM; j_L++) begin
             addr_calc = ((k_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((j_L * TILE_SIZE) + sub_c);
-            load_data_B[k_L][j_L] <= mem_B[addr_calc];
+            load_data_B[k_L][j_L] <= mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
             load_we_B[k_L][j_L]   <= 1;
           end
         end
