@@ -114,8 +114,7 @@ module TB_SystolicMesh;
     forever #(CLK_PERIOD / 2) clk = ~clk;
   end
 
-  // Manual binary32 decode. $signed() and $bitstoshortreal both leave the bit pattern as an integer
-  // under Verilator, which turns a 1% bound into roughly a factor of two.
+  // Manual binary32 decode; $signed() leaves the bit pattern as an integer.
   function automatic real f32(input logic [31:0] b);
     int  e;
     real m, v;
@@ -413,8 +412,7 @@ module TB_SystolicMesh;
   endtask
 
   // ── Streaming: host, mesh and consumer run concurrently ───────────────────
-  // Sampled on the falling edge, from registered state only: TB inputs set after a rising
-  // edge are already taken at that edge, so a combinational view of start is a cycle late.
+  // Sampled on the falling edge from registered state only, never a combinational view of start.
   int  in_overlap = 0, out_overlap = 0, n_launched = 0, n_completed = 0;
   bit  streaming = 0, count_bad = 0;
   wire mesh_busy = (int'(dut.current_state) != 0) && (int'(dut.current_state) != 7);  // not IDLE, not DONE
