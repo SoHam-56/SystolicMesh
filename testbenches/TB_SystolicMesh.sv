@@ -105,7 +105,11 @@ module TB_SystolicMesh;
       .read_enable_i(r_en),
       .read_addr_i  (r_addr),
       .read_data_o  (r_data),
-      .read_valid_o (r_valid)
+      .read_valid_o (r_valid),
+      .wide_read_enable_i(1'b0),
+      .wide_read_index_i ('0),
+      .wide_read_data_o  (),
+      .wide_read_valid_o ()
   );
 
   // ── Clock ─────────────────────────────────────────────────────────────────

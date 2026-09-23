@@ -5,7 +5,8 @@ module SystolicMesh #(
     parameter TILE_SIZE   = 4,
     parameter DATA_WIDTH  = 32,
     parameter ROWS_MEM    = "rows.mem",
-    parameter COLS_MEM    = "cols.mem"
+    parameter COLS_MEM    = "cols.mem",
+    parameter WIDE_READ   = 1  // words per wide result read, one per consumer lane
 ) (
     input logic clk_i,
     input logic rstn_i,
@@ -29,7 +30,13 @@ module SystolicMesh #(
     input  logic                  read_enable_i,
     input  logic [          31:0] read_addr_i,
     output logic [DATA_WIDTH-1:0] read_data_o,
-    output logic                  read_valid_o
+    output logic                  read_valid_o,
+
+    // Wide read: word k is element k * (N*N / WIDE_READ) + wide_read_index_i of the oldest result.
+    input  logic                                 wide_read_enable_i,
+    input  logic [                         31:0] wide_read_index_i,
+    output logic [WIDE_READ-1:0][DATA_WIDTH-1:0] wide_read_data_o,
+    output logic                                 wide_read_valid_o
 );
 
   localparam TILES_PER_DIM = MATRIX_SIZE / TILE_SIZE;
@@ -229,10 +236,21 @@ module SystolicMesh #(
     for (int p = 0; p < NUM_TILES; p++)
       sram_addr_bank[p] = sram_addr_agg[p] + (out_wr ? GLOBAL_ELEMENTS : 0);
 
+  localparam int WIDE_STRIDE = GLOBAL_ELEMENTS / WIDE_READ;
+  logic [WIDE_READ-1:0][31:0] wide_addr;
+  always_comb
+    for (int k = 0; k < WIDE_READ; k++)
+      wide_addr[k] = (out_rd ? GLOBAL_ELEMENTS : 0) + k * WIDE_STRIDE + wide_read_index_i;
+
+  initial
+    if (GLOBAL_ELEMENTS % WIDE_READ != 0)
+      $error("SystolicMesh: WIDE_READ (%0d) must divide N*N (%0d)", WIDE_READ, GLOBAL_ELEMENTS);
+
   MeshOutputSram #(
       .DEPTH(2 * GLOBAL_ELEMENTS),
       .DATA_WIDTH(DATA_WIDTH),
-      .NUM_PORTS(NUM_TILES)
+      .NUM_PORTS(NUM_TILES),
+      .WIDE(WIDE_READ)
   ) output_mem (
       .clk_i(clk_i),
       .rstn_i(rstn_i),
@@ -242,7 +260,11 @@ module SystolicMesh #(
       .read_enable_i(read_enable_i && read_addr_i < GLOBAL_ELEMENTS),
       .read_addr_i(read_addr_i + (out_rd ? GLOBAL_ELEMENTS : 0)),
       .read_data_o(read_data_o),
-      .read_valid_o(read_valid_o)
+      .read_valid_o(read_valid_o),
+      .wide_enable_i(wide_read_enable_i && wide_read_index_i < WIDE_STRIDE),
+      .wide_addr_i(wide_addr),
+      .wide_data_o(wide_read_data_o),
+      .wide_valid_o(wide_read_valid_o)
   );
 
   assign collection_complete_o = out_full[out_rd];  // cleared by release, never sticky
@@ -327,6 +349,8 @@ module SystolicMesh #(
     else $error("SystolicMesh: launched without a full staging bank and a free result bank");
   a_read_outstanding: assert property (@(posedge clk_i) disable iff (!rstn_i) read_enable_i |-> out_full[out_rd])
     else $error("SystolicMesh: result read with no result outstanding");
+  a_wide_read_outstanding: assert property (@(posedge clk_i) disable iff (!rstn_i) wide_read_enable_i |-> out_full[out_rd])
+    else $error("SystolicMesh: wide result read with no result outstanding");
 `ifdef ASSERT_SELFTEST
   a_selftest: assert property (@(posedge clk_i) disable iff (!rstn_i) 1'b0)
     else $error("SystolicMesh: assertion self-test fired, so assertions are live");
