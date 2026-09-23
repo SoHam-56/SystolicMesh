@@ -43,6 +43,12 @@ VCS_DIR = $(PRJ_DIR)/VCS
 # them; `make wave` needs TRACE=1, which is the default.
 TRACE ?= 1
 
+# ccache 3.7 here served corrupted objects that segfaulted at start-up; USE_CCACHE=1 opts back in.
+USE_CCACHE ?= 0
+ifeq ($(USE_CCACHE),0)
+export CCACHE_DISABLE := 1
+endif
+
 VERILATOR_FLAGS = \
 	--timing \
 	--assert \
@@ -92,7 +98,7 @@ verilator:
 		cp $(TB_DIR)/stimulus/*.mem $(VERILATOR_DIR); \
 		fi
 	@echo "-- Running Verilator simulation"
-	cd $(VERILATOR_DIR) && ./$(TOP_MODULE)_sim
+	cd $(VERILATOR_DIR) && $(shell command -v stdbuf >/dev/null && echo stdbuf -oL) ./$(TOP_MODULE)_sim  # line-buffered, so a crash log shows how far it got
 	@echo "-- Verilator simulation complete"
 	@echo "-- Trace file: $(VERILATOR_DIR)/dump.vcd"
 
