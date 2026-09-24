@@ -8,6 +8,7 @@ module TB_SystolicMesh;
   localparam MATRIX_SIZE = 16;
   localparam TILE_SIZE = 4;
   localparam SRAM_SIZE = MATRIX_SIZE * MATRIX_SIZE;
+  localparam int HOST_WORDS = 1;  // words per host write
 
   localparam int NUM_TEST_SETS = 5;
 
@@ -26,7 +27,7 @@ module TB_SystolicMesh;
   reg clk, rstn, start_mult;
 
   reg n_we, w_we, n_rst, w_rst;
-  reg [DATA_WIDTH-1:0] n_data, w_data;
+  reg [HOST_WORDS-1:0][DATA_WIDTH-1:0] n_data, w_data;
   wire n_empty, w_empty, complete;
   wire in_ready, coll_complete;
   reg  rel;
@@ -80,7 +81,8 @@ module TB_SystolicMesh;
   SystolicMesh #(
       .MATRIX_SIZE(MATRIX_SIZE),
       .TILE_SIZE  (TILE_SIZE),
-      .DATA_WIDTH (DATA_WIDTH)
+      .DATA_WIDTH (DATA_WIDTH),
+      .HOST_WORDS (HOST_WORDS)
   ) dut (
       .clk_i(clk),
       .rstn_i(rstn),
@@ -220,11 +222,18 @@ module TB_SystolicMesh;
       )) begin
         res = $fscanf(fh, "%h", tmp);
         if (res == 1) begin
-          w_we   = 1;
-          w_data = tmp;
-          @(posedge clk);
+          w_data[cnt % HOST_WORDS] = tmp;
           cnt++;
+          if (cnt % HOST_WORDS == 0) begin
+            w_we = 1;
+            @(posedge clk);
+            w_data = '0;
+          end
         end
+      end
+      if (cnt % HOST_WORDS != 0) begin  // a short last write; the rest of the bank is zero anyway
+        w_we = 1;
+        @(posedge clk);
       end
       w_we = 0;
       @(posedge clk);
@@ -251,11 +260,18 @@ module TB_SystolicMesh;
       )) begin
         res = $fscanf(fh, "%h", tmp);
         if (res == 1) begin
-          n_we   = 1;
-          n_data = tmp;
-          @(posedge clk);
+          n_data[cnt % HOST_WORDS] = tmp;
           cnt++;
+          if (cnt % HOST_WORDS == 0) begin
+            n_we = 1;
+            @(posedge clk);
+            n_data = '0;
+          end
         end
+      end
+      if (cnt % HOST_WORDS != 0) begin  // a short last write; the rest of the bank is zero anyway
+        n_we = 1;
+        @(posedge clk);
       end
       n_we = 0;
       @(posedge clk);

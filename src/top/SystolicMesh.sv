@@ -6,17 +6,18 @@ module SystolicMesh #(
     parameter DATA_WIDTH  = 32,
     parameter ROWS_MEM    = "rows.mem",
     parameter COLS_MEM    = "cols.mem",
-    parameter WIDE_READ   = 1  // words per wide result read, one per consumer lane
+    parameter WIDE_READ   = 1,  // words per wide result read, one per consumer lane
+    parameter HOST_WORDS  = 1   // words per host write; must divide MATRIX_SIZE*MATRIX_SIZE
 ) (
     input logic clk_i,
     input logic rstn_i,
     input logic start_matrix_mult_i,
 
     input logic                  north_write_enable_i,
-    input logic [DATA_WIDTH-1:0] north_write_data_i,
+    input logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] north_write_data_i,
     input logic                  north_write_reset_i,
     input logic                  west_write_enable_i,
-    input logic [DATA_WIDTH-1:0] west_write_data_i,
+    input logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] west_write_data_i,
     input logic                  west_write_reset_i,
 
     output logic north_queue_empty_o,
@@ -47,6 +48,7 @@ module SystolicMesh #(
   logic [DATA_WIDTH-1:0] mem_A[0:2*GLOBAL_ELEMENTS-1];
   logic [DATA_WIDTH-1:0] mem_B[0:2*GLOBAL_ELEMENTS-1];
   logic [$clog2(GLOBAL_ELEMENTS):0] ptr_A, ptr_B;
+  initial if ((GLOBAL_ELEMENTS % HOST_WORDS) != 0) $error("SystolicMesh: HOST_WORDS (%0d) must divide %0d", HOST_WORDS, GLOBAL_ELEMENTS);
   logic [1:0] in_full;  // per staging bank: a started set not yet broadcast
   logic in_wr, in_rd;  // bank the host writes, bank BROADCAST reads
   logic start_accept, bcast_release;
@@ -67,13 +69,13 @@ module SystolicMesh #(
       // Rewind as each set is accepted; unrewound, the pointer wraps and reads back as empty.
       if (west_write_reset_i || start_accept) ptr_A <= '0;
       else if (west_write_enable_i && input_ready_o && ptr_A < GLOBAL_ELEMENTS) begin
-        mem_A[int'(in_wr)*GLOBAL_ELEMENTS+int'(ptr_A)] <= west_write_data_i;
-        ptr_A <= ptr_A + 1;
+        for (int c = 0; c < HOST_WORDS; c++) mem_A[int'(in_wr)*GLOBAL_ELEMENTS+int'(ptr_A)+c] <= west_write_data_i[c];
+        ptr_A <= ptr_A + HOST_WORDS;
       end
       if (north_write_reset_i || start_accept) ptr_B <= '0;
       else if (north_write_enable_i && input_ready_o && ptr_B < GLOBAL_ELEMENTS) begin
-        mem_B[int'(in_wr)*GLOBAL_ELEMENTS+int'(ptr_B)] <= north_write_data_i;
-        ptr_B <= ptr_B + 1;
+        for (int c = 0; c < HOST_WORDS; c++) mem_B[int'(in_wr)*GLOBAL_ELEMENTS+int'(ptr_B)+c] <= north_write_data_i[c];
+        ptr_B <= ptr_B + HOST_WORDS;
       end
       if (start_accept) begin
         in_full[in_wr] <= 1'b1;
