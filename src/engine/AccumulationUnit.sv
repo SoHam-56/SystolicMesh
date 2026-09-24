@@ -1,11 +1,8 @@
 `timescale 1ns / 100ps
 
 // Reduces the P partial tiles into one output tile, then writes it to the mesh SRAM.
-//
-// The P accumulation steps for a single pixel are loop-carried, but the PIXELS pixels are
-// independent, so the pixels are rotated through the one pipelined adder (C-slow) instead of
-// stalling on its latency once per step. One add is issued per cycle; a pixel is only revisited
-// a full round later, which is why the round period has a floor of ADD_LAT+1.
+// Every cycle it reads the same pixel from all P partial tiles and sums them in a log2(P) adder tree.
+// Results leave the tree in pixel order, one per cycle, and are written as they emerge.
 module AccumulationUnit #(
     parameter P = 8,
     parameter N = 4,
@@ -31,150 +28,132 @@ module AccumulationUnit #(
     output logic done_o
 );
   localparam int PIXELS = N * N;
-  localparam int PXW = $clog2(PIXELS);
+  localparam int CW = $clog2(PIXELS + 1);
   localparam int ADD_LAT = 5;  // fp32Adder: valid_i at t, done_o at t+5
-  localparam int MIN_PER = ADD_LAT + 1;  // a pixel must not be revisited before its write-back
-  localparam int PERIOD = (PIXELS > MIN_PER) ? PIXELS : MIN_PER;
-  localparam int CW = $clog2(PERIOD + 1);
+  localparam int LEVELS = $clog2(P);  // adder levels; 0 when there is one partial tile
 
-  logic [DATA_WIDTH-1:0] acc[PIXELS];
+  // Entries at tree level l: level 0 holds the P partial pixels.
+  function automatic int width_at(input int l);
+    return (P + (1 << l) - 1) >> l;
+  endfunction
 
-  logic [CW-1:0] cyc;  // position within the current round
-  logic [  31:0] k_idx;  // which partial tile this round consumes
-  logic [PXW-1:0] w_idx;  // pixel being written out
-  logic [   3:0] drain_cnt;
-
-  typedef enum logic [2:0] {
+  typedef enum logic [1:0] {
     RIDLE,
-    ROUND,
-    DRAIN,
-    WRITE,
+    RREAD,
+    RWAIT,
     RDONE
   } rstate_t;
   rstate_t r_curr;
 
-  logic [PXW-1:0] cyc_px;
+  logic [CW-1:0] rd_idx;  // pixel being read from all P partial tiles
+  logic [CW-1:0] w_idx;  // pixels written so far
+
   logic read_issue;
-  assign cyc_px = cyc[PXW-1:0];
-  assign read_issue = (r_curr == ROUND) && (cyc < PIXELS);
-
-  // A read issued at cycle t presents its data at t+1, so the add is issued one cycle behind.
-  logic iss_v;
-  logic [PXW-1:0] iss_p;
-  logic [   31:0] iss_k;  // k must lag with the data, or the last add of a round reads tile k+1
-
-  logic [ADD_LAT-1:0] d_v;
-  logic [PXW-1:0] d_p[ADD_LAT];
-
-  logic add_done;
-  logic [DATA_WIDTH-1:0] add_res, op_a, op_b;
-
-  assign op_a = acc[iss_p];
-  assign op_b = tile_data_i[iss_k];
-
-  fp32Adder adder (
-      .clk_i(clk_i),
-      .rstn_i(rstn_i),
-      .valid_i(iss_v),
-      .A(op_a),
-      .B(op_b),
-      .result_o(add_res),
-      .done_o(add_done),
-      .overflow_o(),
-      .underflow_o(),
-      .invalid_o()
-  );
-
-  logic [31:0] local_row, local_col, global_addr;
-
-  always_comb begin
-    local_row   = w_idx / N;
-    local_col   = w_idx % N;
-    global_addr = ((TILE_ROW_OFFSET + local_row) * MATRIX_WIDTH) + (TILE_COL_OFFSET + local_col);
-  end
+  assign read_issue = (r_curr == RREAD);
 
   always_comb begin
     tile_ren_o  = '0;
     tile_addr_o = '{default: 0};
-    if (read_issue) begin
-      tile_ren_o[k_idx]  = 1'b1;
-      tile_addr_o[k_idx] = cyc_px;
-    end
+    if (read_issue)
+      for (int k = 0; k < P; k++) begin
+        tile_ren_o[k]  = 1'b1;
+        tile_addr_o[k] = 32'(rd_idx);
+      end
   end
 
-  assign write_en_o   = (r_curr == WRITE);
-  assign write_addr_o = global_addr;
-  assign write_data_o = acc[w_idx];
+  // A read issued at cycle t presents its data at t+1, so level 0 is valid one cycle behind.
+  logic lvl0_v;
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) lvl0_v <= 1'b0;
+    else lvl0_v <= read_issue;
+  end
+
+  logic [DATA_WIDTH-1:0] lvl_d[LEVELS+1][P];
+  logic                  lvl_v[LEVELS+1];
+  assign lvl_v[0] = lvl0_v;
+  for (genvar k = 0; k < P; k++) begin : L0
+    assign lvl_d[0][k] = tile_data_i[k];
+  end
+
+  for (genvar l = 0; l < LEVELS; l++) begin : LVL
+    localparam int IN_W = width_at(l);
+    localparam int OUT_W = width_at(l + 1);
+    logic [OUT_W-1:0] done_bits;
+    for (genvar m = 0; m < OUT_W; m++) begin : NODE
+      if (2 * m + 1 < IN_W) begin : ADD
+        fp32Adder adder (
+            .clk_i      (clk_i),
+            .rstn_i     (rstn_i),
+            .valid_i    (lvl_v[l]),
+            .A          (lvl_d[l][2*m]),
+            .B          (lvl_d[l][2*m+1]),
+            .result_o   (lvl_d[l+1][m]),
+            .done_o     (done_bits[m]),
+            .overflow_o (),
+            .underflow_o(),
+            .invalid_o  ()
+        );
+      end else begin : PASS
+        // An odd entry out: delay it by the adder latency so it stays aligned with its level.
+        logic [DATA_WIDTH-1:0] dly[ADD_LAT];
+        logic                  vdly[ADD_LAT];
+        always_ff @(posedge clk_i or negedge rstn_i) begin
+          if (!rstn_i) begin
+            for (int s = 0; s < ADD_LAT; s++) begin
+              dly[s]  <= '0;
+              vdly[s] <= 1'b0;
+            end
+          end else begin
+            dly[0]  <= lvl_d[l][2*m];
+            vdly[0] <= lvl_v[l];
+            for (int s = 1; s < ADD_LAT; s++) begin
+              dly[s]  <= dly[s-1];
+              vdly[s] <= vdly[s-1];
+            end
+          end
+        end
+        assign lvl_d[l+1][m] = dly[ADD_LAT-1];
+        assign done_bits[m]  = vdly[ADD_LAT-1];
+      end
+    end
+    for (genvar m = OUT_W; m < P; m++) begin : UNUSED
+      assign lvl_d[l+1][m] = '0;
+    end
+    assign lvl_v[l+1] = done_bits[0];
+  end
+
+  logic [31:0] local_row, local_col;
+  always_comb begin
+    local_row = 32'(w_idx) / N;
+    local_col = 32'(w_idx) % N;
+  end
+
+  assign write_en_o   = lvl_v[LEVELS];
+  assign write_data_o = lvl_d[LEVELS][0];
+  assign write_addr_o = ((TILE_ROW_OFFSET + local_row) * MATRIX_WIDTH) + (TILE_COL_OFFSET + local_col);
   assign done_o       = (r_curr == RDONE);
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
-      r_curr    <= RIDLE;
-      cyc       <= '0;
-      k_idx     <= '0;
-      w_idx     <= '0;
-      drain_cnt <= '0;
-      iss_v     <= 1'b0;
-      iss_p     <= '0;
-      iss_k     <= '0;
-      d_v       <= '0;
-      for (int i = 0; i < PIXELS; i++) acc[i] <= '0;
-      for (int i = 0; i < ADD_LAT; i++) d_p[i] <= '0;
+      r_curr <= RIDLE;
+      rd_idx <= '0;
+      w_idx  <= '0;
     end else begin
-      // Read issue -> add issue -> ADD_LAT stages -> write-back, each one cycle apart.
-      iss_v  <= read_issue;
-      iss_p  <= cyc_px;
-      iss_k  <= k_idx;
-      d_v    <= {d_v[ADD_LAT-2:0], iss_v};
-      d_p[0] <= iss_p;
-      for (int i = 1; i < ADD_LAT; i++) d_p[i] <= d_p[i-1];
-
-      if (d_v[ADD_LAT-1]) acc[d_p[ADD_LAT-1]] <= add_res;
-
+      if (write_en_o) w_idx <= w_idx + 1'b1;
       case (r_curr)
         RIDLE: begin
           if (start_i) begin
-            for (int i = 0; i < PIXELS; i++) acc[i] <= '0;
-            cyc    <= '0;
-            k_idx  <= '0;
+            rd_idx <= '0;
             w_idx  <= '0;
-            r_curr <= ROUND;
+            r_curr <= RREAD;
           end
         end
-
-        ROUND: begin
-          if (cyc == PERIOD - 1) begin
-            cyc <= '0;
-            if (k_idx == P - 1) begin
-              drain_cnt <= '0;
-              r_curr    <= DRAIN;
-            end else begin
-              k_idx <= k_idx + 1'b1;
-            end
-          end else begin
-            cyc <= cyc + 1'b1;
-          end
+        RREAD: begin
+          if (rd_idx == CW'(PIXELS - 1)) r_curr <= RWAIT;
+          else rd_idx <= rd_idx + 1'b1;
         end
-
-        DRAIN: begin
-          // Let every add still inside the adder retire before the results are read out.
-          if (drain_cnt == ADD_LAT + 2) begin
-            w_idx  <= '0;
-            r_curr <= WRITE;
-          end else begin
-            drain_cnt <= drain_cnt + 1'b1;
-          end
-        end
-
-        WRITE: begin
-          if (w_idx == PIXELS - 1) r_curr <= RDONE;
-          else w_idx <= w_idx + 1'b1;
-        end
-
-        // Was latched with no exit at all - the comment claiming the mesh resets
-        // this unit between matmuls was never true, there was no reset port.
+        RWAIT: if (write_en_o && (w_idx == CW'(PIXELS - 1))) r_curr <= RDONE;
         RDONE: if (rearm_i) r_curr <= RIDLE;
-
         default: r_curr <= RIDLE;
       endcase
     end
