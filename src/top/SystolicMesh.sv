@@ -7,7 +7,8 @@ module SystolicMesh #(
     parameter ROWS_MEM    = "rows.mem",
     parameter COLS_MEM    = "cols.mem",
     parameter WIDE_READ   = 1,  // words per wide result read, one per consumer lane
-    parameter HOST_WORDS  = 1   // words per host write; must divide MATRIX_SIZE*MATRIX_SIZE
+    parameter HOST_WORDS  = 1,  // words per host write; must divide MATRIX_SIZE*MATRIX_SIZE
+    parameter SYNC_TILES  = 1   // 1: SyncArray tiles, one product per PE per cycle; 0: the handshake SystolicArray
 ) (
     input logic clk_i,
     input logic rstn_i,
@@ -312,33 +313,63 @@ module SystolicMesh #(
         );
 
         for (k = 0; k < TILES_PER_DIM; k++) begin : DEPTH
-          SystolicArray #(
-              .N(TILE_SIZE),
-              .DATA_WIDTH(DATA_WIDTH),
-              .WRITE_WORDS(TILE_SIZE),
-              .ROWS(ROWS_MEM),
-              .COLS(COLS_MEM)
-          ) tile (
-              .clk_i(clk_i),
-              .rstn_i(rstn_i),
-              .start_matrix_mult_i(tiles_global_start),
-              .rearm_i(rearm_q),
-              .west_write_enable_i(load_we_A[i][k]),
-              .west_write_data_i(load_data_A[i][k]),
-              .west_write_reset_i(ctrl_reset_all),
-              .north_write_enable_i(load_we_B[k][j]),
-              .north_write_data_i(load_data_B[k][j]),
-              .north_write_reset_i(ctrl_reset_all),
-              .collection_complete_o(tile_col_done[i][j][k]),
-              .collection_active_o(tile_col_active[i][j][k]),
-              .matrix_mult_complete_o(),
-              .north_queue_empty_o(),
-              .west_queue_empty_o(),
-              .read_enable_i(t_ren[i][j][k]),
-              .read_addr_i(t_addr[i][j][k]),
-              .read_data_o(t_data[i][j][k]),
-              .read_valid_o(t_valid[i][j][k])
-          );
+          if (SYNC_TILES) begin : S
+            SyncArray #(
+                .N(TILE_SIZE),
+                .K(TILE_SIZE),
+                .DATA_WIDTH(DATA_WIDTH),
+                .WEST_WORDS(TILE_SIZE),
+                .NORTH_WORDS(TILE_SIZE)
+            ) tile (
+                .clk_i(clk_i),
+                .rstn_i(rstn_i),
+                .start_matrix_mult_i(tiles_global_start),
+                .rearm_i(rearm_q),
+                .west_write_enable_i(load_we_A[i][k]),
+                .west_write_data_i(load_data_A[i][k]),
+                .west_write_reset_i(ctrl_reset_all),
+                .north_write_enable_i(load_we_B[k][j]),
+                .north_write_data_i(load_data_B[k][j]),
+                .north_write_reset_i(ctrl_reset_all),
+                .collection_complete_o(tile_col_done[i][j][k]),
+                .collection_active_o(tile_col_active[i][j][k]),
+                .matrix_mult_complete_o(),
+                .north_queue_empty_o(),
+                .west_queue_empty_o(),
+                .read_enable_i(t_ren[i][j][k]),
+                .read_addr_i(t_addr[i][j][k]),
+                .read_data_o(t_data[i][j][k]),
+                .read_valid_o(t_valid[i][j][k])
+            );
+          end else begin : L
+            SystolicArray #(
+                .N(TILE_SIZE),
+                .DATA_WIDTH(DATA_WIDTH),
+                .WRITE_WORDS(TILE_SIZE),
+                .ROWS(ROWS_MEM),
+                .COLS(COLS_MEM)
+            ) tile (
+                .clk_i(clk_i),
+                .rstn_i(rstn_i),
+                .start_matrix_mult_i(tiles_global_start),
+                .rearm_i(rearm_q),
+                .west_write_enable_i(load_we_A[i][k]),
+                .west_write_data_i(load_data_A[i][k]),
+                .west_write_reset_i(ctrl_reset_all),
+                .north_write_enable_i(load_we_B[k][j]),
+                .north_write_data_i(load_data_B[k][j]),
+                .north_write_reset_i(ctrl_reset_all),
+                .collection_complete_o(tile_col_done[i][j][k]),
+                .collection_active_o(tile_col_active[i][j][k]),
+                .matrix_mult_complete_o(),
+                .north_queue_empty_o(),
+                .west_queue_empty_o(),
+                .read_enable_i(t_ren[i][j][k]),
+                .read_addr_i(t_addr[i][j][k]),
+                .read_data_o(t_data[i][j][k]),
+                .read_valid_o(t_valid[i][j][k])
+            );
+          end
         end
       end
     end
