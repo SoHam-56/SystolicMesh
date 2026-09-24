@@ -138,7 +138,9 @@ module TB_SyncArray #(
       $display("  set %0d: %0d cycles from start to complete", set, cycles);
     end
     $display("SyncArray N=%0d K=%0d: %0d pixels checked, %0d failed, worst %0d cycles", N, K, checked, failed, worst_cycles);
-    $display(failed == 0 && checked == NSETS * N * N ? "RESULT: PASSED" : "RESULT: FAILED");
+    // A ternary of two strings prints as a number under Verilator, so branch instead.
+    if (failed == 0 && checked == NSETS * N * N) $display("RESULT: PASSED");
+    else $display("RESULT: FAILED");
     $finish;
   end
 endmodule
