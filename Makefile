@@ -19,6 +19,7 @@ _FAST_FLAG = $(if $(filter 1,$(FAST)),--fast)
 DESIGN_FILES = \
   top/SystolicMesh.sv \
   top/SystolicArray.sv \
+  top/SyncArray.sv \
   mem/RowInputQueue.sv \
   mem/ColumnInputQueue.sv \
   mem/OutputSram.sv \
@@ -27,6 +28,7 @@ DESIGN_FILES = \
   engine/ProcessingElement.sv \
   engine/AccumulationUnit.sv \
   engine/MAC.sv \
+  engine/SyncPE.sv \
   ../ArithmeticLibrary/Multipliers/Radix4Booth/src/R4Booth.sv \
   ../ArithmeticLibrary/Multipliers/Karatsuba/src/karatsubaUnsigned.sv \
 	../ArithmeticLibrary/Multipliers/FP32/src/fp32Multiplier.sv \
