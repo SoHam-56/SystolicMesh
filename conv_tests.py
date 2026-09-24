@@ -138,6 +138,62 @@ def _im2col_patches(image: np.ndarray, K: int, stride: int):
     return patches, positions
 
 
+def _is_square(N: int) -> bool:
+    return math.isqrt(N) ** 2 == N
+
+
+def _general_pair(N: int, seed: int, kernel: str = "random", grid=None, stride=None,
+                  c_in=None, n_filters: int = 1) -> tuple:
+    """One (A, B) im2col pair for any N: a 3x3 kernel over c_in channels, depth zero-padded to N.
+
+    Rows of A are patches (at most N per pair; unused rows are zero), columns of B are filters.
+    kernel: random | zero | ones | impulse | large.  n_filters > 1 gives distinct filter columns;
+    otherwise the one filter is repeated across all N columns, as in the square-N basic tests.
+    """
+    K = 3
+    c_in = c_in or max(1, min(4, N // (K * K)))
+    D = c_in * K * K
+    if D > N:
+        raise ValueError(f"N={N}: depth {D} does not fit")
+    g = grid or math.isqrt(N)
+    S = stride or K
+    side = (g - 1) * S + K
+    _seed(seed)
+    image = np.random.uniform(-1, 1, (side, side, c_in)).astype(np.float32)
+    patches, _ = _im2col_patches(image, K, S)
+
+    def one_filter():
+        if kernel == "zero":
+            return np.zeros(D, dtype=np.float32)
+        if kernel == "ones":
+            return np.ones(D, dtype=np.float32)
+        if kernel == "impulse":  # centre pixel of channel 0; patches flatten as (row, col, channel)
+            v = np.zeros(D, dtype=np.float32)
+            v[((K // 2) * K + K // 2) * c_in] = 1.0
+            return v
+        lim = 10.0 if kernel == "large" else 1.0
+        return np.random.uniform(-lim, lim, D).astype(np.float32)
+
+    B = np.zeros((N, N), dtype=np.float32)
+    if n_filters > 1:
+        for j in range(n_filters):
+            B[:D, j] = one_filter()
+    else:
+        B[:D, :] = one_filter()[:, np.newaxis]
+    pairs = []
+    for b in range(0, len(patches), N):
+        A = np.zeros((N, N), dtype=np.float32)
+        chunk = patches[b:b + N]
+        A[:len(chunk), :D] = np.stack(chunk)
+        pairs.append((A, B))
+    return pairs
+
+
+def _general_sets(N: int, seed0: int, **kw) -> list:
+    """Three single-batch pairs with distinct seeds, for the non-square-N basic tests."""
+    return [_general_pair(N, seed0 + i, **kw)[0] for i in range(3)]
+
+
 def _debug_table(tag: str, C: np.ndarray, patches: list, P: int, out_side: int) -> None:
     print(f"\n  [DEBUG] {tag}  —  {len(patches)} patches, P={P}, map {out_side}×{out_side}")
     print(f"  {'patch':>6}  {'SRAM addr':>10}  {'conv_out':>14}  hex")
@@ -167,6 +223,8 @@ def _basic_pair(img_size: int, K: int, seed: int) -> tuple:
 
 def gen_conv_random(stim_dir: str, N: int, debug: bool = False) -> int:
     """K*K × K*K image, non-overlapping stride → P patches, 100% utilisation."""
+    if not _is_square(N):
+        return _write_all(_pad_to(_general_sets(N, 700), CONV_NUM_SETS), stim_dir)
     K   = _kernel_size(N)
     img = K * K
     sets = [_basic_pair(img, K, seed=700 + i) for i in range(3)]
@@ -179,6 +237,8 @@ def gen_conv_random(stim_dir: str, N: int, debug: bool = False) -> int:
 
 def gen_conv_zero_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
     """Zero kernel → all outputs must be exactly zero."""
+    if not _is_square(N):
+        return _write_all(_pad_to(_general_sets(N, 800, kernel="zero"), CONV_NUM_SETS), stim_dir)
     K, P = _kernel_size(N), N
     img  = K * K
     sets = []
@@ -194,6 +254,8 @@ def gen_conv_zero_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
 
 def gen_conv_ones_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
     """All-ones kernel → output = sum of each patch element."""
+    if not _is_square(N):
+        return _write_all(_pad_to(_general_sets(N, 900, kernel="ones"), CONV_NUM_SETS), stim_dir)
     K, P = _kernel_size(N), N
     img  = K * K
     sets = []
@@ -209,6 +271,8 @@ def gen_conv_ones_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
 
 def gen_conv_impulse_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
     """Center-impulse kernel → output = center pixel of each patch."""
+    if not _is_square(N):
+        return _write_all(_pad_to(_general_sets(N, 1000, kernel="impulse"), CONV_NUM_SETS), stim_dir)
     K, P   = _kernel_size(N), N
     img    = K * K
     center = (K // 2) * K + (K // 2)
@@ -227,6 +291,8 @@ def gen_conv_impulse_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
 
 def gen_conv_padded(stim_dir: str, N: int, debug: bool = False) -> int:
     """Half-size image → ~25% utilisation (zero-padding in A)."""
+    if not _is_square(N):
+        return _write_all(_pad_to(_general_sets(N, 1100, grid=max(1, math.isqrt(N) // 2)), CONV_NUM_SETS), stim_dir)
     K   = _kernel_size(N)
     img = K * (K // 2)          # half the tiles per side
     sets = [_basic_pair(img, K, seed=1100 + i) for i in range(3)]
@@ -235,6 +301,8 @@ def gen_conv_padded(stim_dir: str, N: int, debug: bool = False) -> int:
 
 def gen_conv_large_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
     """Kernel values ±10 — stresses output range."""
+    if not _is_square(N):
+        return _write_all(_pad_to(_general_sets(N, 1200, kernel="large"), CONV_NUM_SETS), stim_dir)
     K, P = _kernel_size(N), N
     img  = K * K
     sets = []
@@ -266,6 +334,9 @@ def gen_conv_adv_stride(stim_dir: str, N: int,
 
     Readback:  patch i → batch = i//P,  row = i%P,  SRAM addr = row*P
     """
+    if not _is_square(N):
+        # Stride 1 over a (sqrt(N)+1)^2 grid gives more than N patches, so several batches.
+        return _write_all(_pad_to(_general_pair(N, seed, grid=math.isqrt(N) + 1, stride=1), CONV_NUM_SETS), stim_dir)
     K        = _kernel_size(N)
     P        = N
     S        = max(1, K // 2)
@@ -322,6 +393,8 @@ def gen_conv_adv_multi_out(stim_dir: str, N: int,
     B[P×P] col  j  = filter_j.flatten()
     C[P×P] C[i,j] = dot(patch_i, filter_j)
     """
+    if not _is_square(N):
+        return _write_all(_pad_to(_general_sets(N, seed, n_filters=N), CONV_NUM_SETS), stim_dir)
     K   = _kernel_size(N)
     P   = N
     img = K * K
@@ -357,6 +430,10 @@ def gen_conv_adv_multi_in(stim_dir: str, N: int,
     K derived from N:  C_in × K² = N  →  K = sqrt(N // C_in).
     N_out = P // 2 active output filters (remaining B columns are zero).
     """
+    if N % 4 or not _is_square(N // 4):
+        # General N: as many channels as fit a 3x3 kernel (at least 2), N/2 distinct filters.
+        cin = max(2, min(4, N // 9))
+        return _write_all(_pad_to(_general_sets(N, seed, c_in=cin, n_filters=N // 2), CONV_NUM_SETS), stim_dir)
     C_IN  = 4
     P     = N
     K_sq  = P // C_IN
@@ -419,7 +496,7 @@ def _list_tests(N: int) -> None:
     K     = int(math.isqrt(N))
     valid = K * K == N
     tiles = ", ".join(str(t) for t in pow2_tile_sizes(N))
-    print(f"\n  Matrix size    : {N}×{N}   K={K}{'  ✓' if valid else '  ✗ (must be perfect square)'}")
+    print(f"\n  Matrix size    : {N}×{N}   " + (f"K={K}" if valid else "general layout: 3x3 kernel, depth zero-padded to N"))
     print(f"  Tile sweep     : {tiles}")
     print(f"  Sets per test  : {CONV_NUM_SETS} (fixed — short tests padded)")
     print(f"\n  {'Name':<26}  {'Adv':<5}  Description")

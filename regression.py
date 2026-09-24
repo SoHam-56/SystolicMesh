@@ -390,16 +390,7 @@ def main() -> None:
     else:
         run_mm, run_conv = mm_tests, conv_tests
 
-    if run_conv:
-        K = int(math.isqrt(N))
-        if K * K != N:
-            print(
-                err(
-                    f"[ERROR] Conv tests require N = K²  (perfect square). "
-                    f"N={N} is not.  Try N=16, 64, 256 — or use --group matmul."
-                )
-            )
-            sys.exit(1)
+    # Conv tests use a general 3x3 layout when N is not a perfect square; see conv_tests._general_pair.
 
     # ── Tile list ─────────────────────────────────────────────────────────
     all_tiles = pow2_tile_sizes(N)
