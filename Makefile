@@ -57,6 +57,9 @@ VERILATOR_FLAGS = \
 	--top-module $(TOP_MODULE) \
 	--threads 8 \
 	--build-jobs $(shell nproc) \
+	--output-split 20000 \
+	--output-split-cfuncs 20000 \
+	--output-groups 64 \
 	--sv \
 	-I$(SRC_DIR) \
 	-I$(TB_DIR) \
