@@ -8,7 +8,8 @@ module SystolicMesh #(
     parameter COLS_MEM    = "cols.mem",
     parameter WIDE_READ   = 1,  // words per wide result read, one per consumer lane
     parameter HOST_WORDS  = 1,  // words per host write; must divide MATRIX_SIZE*MATRIX_SIZE
-    parameter SYNC_TILES  = 1   // 1: SyncArray tiles, one product per PE per cycle; 0: the handshake SystolicArray
+    parameter SYNC_TILES  = 1,  // 1: SyncArray tiles, one product per PE per cycle; 0: the handshake SystolicArray
+    parameter COLLAPSE_K  = 0   // 1: one full-depth tile per output tile, no depth slices and no reduce; needs SYNC_TILES
 ) (
     input logic clk_i,
     input logic rstn_i,
@@ -45,6 +46,9 @@ module SystolicMesh #(
   localparam GLOBAL_ELEMENTS = MATRIX_SIZE * MATRIX_SIZE;
   localparam TILE_ELEMENTS = TILE_SIZE * TILE_SIZE;
   localparam NUM_TILES = TILES_PER_DIM * TILES_PER_DIM;
+  localparam RP = COLLAPSE_K ? 1 : TILES_PER_DIM;  // partial tiles per output tile
+  localparam LW = COLLAPSE_K ? MATRIX_SIZE : TILE_SIZE;  // words per broadcast write
+  initial if (COLLAPSE_K && !SYNC_TILES) $error("SystolicMesh: COLLAPSE_K needs SYNC_TILES");
 
   logic [DATA_WIDTH-1:0] mem_A[0:2*GLOBAL_ELEMENTS-1];
   logic [DATA_WIDTH-1:0] mem_B[0:2*GLOBAL_ELEMENTS-1];
@@ -187,9 +191,9 @@ module SystolicMesh #(
   end
 
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] load_we_A, load_we_B;
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILE_SIZE-1:0][DATA_WIDTH-1:0] load_data_A, load_data_B;
+  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][LW-1:0][DATA_WIDTH-1:0] load_data_A, load_data_B;
   logic tiles_global_start;
-  integer i_L, j_L, k_L, sub_r, sub_c, addr_calc;
+  integer i_L, j_L, k_L, sub_r, sub_c, addr_calc, w_L, rr_L;
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -211,6 +215,24 @@ module SystolicMesh #(
       load_we_B <= '{default: 0};
       if (ctrl_load_en) begin
         sub_r = load_idx;  // tile row copied this cycle
+        if (COLLAPSE_K) begin
+          // Tile row i takes row sub_r of its T x N slab of A; tile column j takes N/T rows of its N x T slab of B.
+          for (i_L = 0; i_L < TILES_PER_DIM; i_L++) begin
+            for (sub_c = 0; sub_c < MATRIX_SIZE; sub_c++) begin
+              addr_calc = ((i_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + sub_c;
+              load_data_A[i_L][0][sub_c] <= mem_A[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
+            end
+            load_we_A[i_L][0] <= 1;
+          end
+          for (j_L = 0; j_L < TILES_PER_DIM; j_L++) begin
+            for (w_L = 0; w_L < MATRIX_SIZE; w_L++) begin
+              rr_L = sub_r * TILES_PER_DIM + w_L / TILE_SIZE;
+              addr_calc = rr_L * MATRIX_SIZE + j_L * TILE_SIZE + w_L % TILE_SIZE;
+              load_data_B[0][j_L][w_L] <= mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
+            end
+            load_we_B[0][j_L] <= 1;
+          end
+        end else begin
         for (i_L = 0; i_L < TILES_PER_DIM; i_L++) begin
           for (k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
             for (sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
@@ -228,6 +250,7 @@ module SystolicMesh #(
             end
             load_we_B[k_L][j_L] <= 1;
           end
+        end
         end
       end
     end
@@ -289,7 +312,7 @@ module SystolicMesh #(
         localparam TILE_IDX = i * TILES_PER_DIM + j;
 
         AccumulationUnit #(
-            .P(TILES_PER_DIM),
+            .P(RP),
             .N(TILE_SIZE),
             .DATA_WIDTH(DATA_WIDTH),
             .MATRIX_WIDTH(MATRIX_SIZE),
@@ -300,10 +323,10 @@ module SystolicMesh #(
             .rstn_i(rstn_i),
             .start_i(ctrl_reduce_pulse),
             .rearm_i(rearm_q),
-            .tile_data_i(t_data[i][j]),
-            .tile_valid_i(t_valid[i][j]),
-            .tile_ren_o(t_ren[i][j]),
-            .tile_addr_o(t_addr[i][j]),
+            .tile_data_i(t_data[i][j][RP-1:0]),
+            .tile_valid_i(t_valid[i][j][RP-1:0]),
+            .tile_ren_o(t_ren[i][j][RP-1:0]),
+            .tile_addr_o(t_addr[i][j][RP-1:0]),
 
             .write_en_o  (sram_we_agg[TILE_IDX]),
             .write_addr_o(sram_addr_agg[TILE_IDX]),
@@ -313,13 +336,19 @@ module SystolicMesh #(
         );
 
         for (k = 0; k < TILES_PER_DIM; k++) begin : DEPTH
-          if (SYNC_TILES) begin : S
+          if (COLLAPSE_K && k > 0) begin : UNUSED
+            // Collapsed: only depth slot 0 exists; the rest read as finished and empty.
+            assign tile_col_done[i][j][k] = 1'b1;
+            assign tile_col_active[i][j][k] = 1'b0;
+            assign t_data[i][j][k] = '0;
+            assign t_valid[i][j][k] = 1'b0;
+          end else if (SYNC_TILES) begin : S
             SyncArray #(
                 .N(TILE_SIZE),
-                .K(TILE_SIZE),
+                .K(COLLAPSE_K ? MATRIX_SIZE : TILE_SIZE),
                 .DATA_WIDTH(DATA_WIDTH),
-                .WEST_WORDS(TILE_SIZE),
-                .NORTH_WORDS(TILE_SIZE)
+                .WEST_WORDS(LW),
+                .NORTH_WORDS(LW)
             ) tile (
                 .clk_i(clk_i),
                 .rstn_i(rstn_i),
