@@ -111,7 +111,7 @@ module SystolicMesh #(
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] reducer_done;
   integer load_idx;
 
-  assign loading_done = (load_idx >= TILE_ELEMENTS - 1);
+  assign loading_done = (load_idx >= TILE_SIZE - 1);  // one tile row per cycle
   assign bcast_release = (current_state == BROADCAST) && loading_done;  // bank copied into the tiles
   assign all_tiles_collected = &tile_col_done;
   assign all_reducers_done = &reducer_done;
@@ -184,7 +184,7 @@ module SystolicMesh #(
   end
 
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] load_we_A, load_we_B;
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][DATA_WIDTH-1:0] load_data_A, load_data_B;
+  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILE_SIZE-1:0][DATA_WIDTH-1:0] load_data_A, load_data_B;
   logic tiles_global_start;
   integer i_L, j_L, k_L, sub_r, sub_c, addr_calc;
 
@@ -207,20 +207,23 @@ module SystolicMesh #(
       load_we_A <= '{default: 0};
       load_we_B <= '{default: 0};
       if (ctrl_load_en) begin
-        sub_r = load_idx / TILE_SIZE;
-        sub_c = load_idx % TILE_SIZE;
+        sub_r = load_idx;  // tile row copied this cycle
         for (i_L = 0; i_L < TILES_PER_DIM; i_L++) begin
           for (k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
-            addr_calc = ((i_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((k_L * TILE_SIZE) + sub_c);
-            load_data_A[i_L][k_L] <= mem_A[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
-            load_we_A[i_L][k_L]   <= 1;
+            for (sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
+              addr_calc = ((i_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((k_L * TILE_SIZE) + sub_c);
+              load_data_A[i_L][k_L][sub_c] <= mem_A[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
+            end
+            load_we_A[i_L][k_L] <= 1;
           end
         end
         for (k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
           for (j_L = 0; j_L < TILES_PER_DIM; j_L++) begin
-            addr_calc = ((k_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((j_L * TILE_SIZE) + sub_c);
-            load_data_B[k_L][j_L] <= mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
-            load_we_B[k_L][j_L]   <= 1;
+            for (sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
+              addr_calc = ((k_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((j_L * TILE_SIZE) + sub_c);
+              load_data_B[k_L][j_L][sub_c] <= mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
+            end
+            load_we_B[k_L][j_L] <= 1;
           end
         end
       end
@@ -310,6 +313,7 @@ module SystolicMesh #(
           SystolicArray #(
               .N(TILE_SIZE),
               .DATA_WIDTH(DATA_WIDTH),
+              .WRITE_WORDS(TILE_SIZE),
               .ROWS(ROWS_MEM),
               .COLS(COLS_MEM)
           ) tile (

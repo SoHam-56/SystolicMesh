@@ -3,6 +3,7 @@
 module SystolicArray #(
     parameter N          = 8,
     parameter DATA_WIDTH = 32,
+    parameter WRITE_WORDS = 1,  // queue words per write: 1, or N for one tile row per cycle
     parameter ROWS       = "rows.mem",
     parameter COLS       = "cols.mem"
 ) (
@@ -12,12 +13,12 @@ module SystolicArray #(
     input logic rearm_i,
 
     input logic                  north_write_enable_i,
-    input logic [DATA_WIDTH-1:0] north_write_data_i,
+    input logic [WRITE_WORDS-1:0][DATA_WIDTH-1:0] north_write_data_i,
     input logic                  north_write_reset_i,
 
     // West Queue Write interface
     input logic                  west_write_enable_i,
-    input logic [DATA_WIDTH-1:0] west_write_data_i,
+    input logic [WRITE_WORDS-1:0][DATA_WIDTH-1:0] west_write_data_i,
     input logic                  west_write_reset_i,
 
     output logic north_queue_empty_o,
@@ -56,6 +57,7 @@ module SystolicArray #(
   NorthInputQueue #(
       .N         (N),
       .DATA_WIDTH(DATA_WIDTH),
+      .WRITE_WORDS(WRITE_WORDS),
       .MEM_FILE  (COLS)
   ) north_queue (
       .clk_i (clk_i),
@@ -77,6 +79,7 @@ module SystolicArray #(
   WestInputQueue #(
       .N         (N),
       .DATA_WIDTH(DATA_WIDTH),
+      .WRITE_WORDS(WRITE_WORDS),
       .MEM_FILE  (ROWS)
   ) west_queue (
       .clk_i (clk_i),
@@ -145,6 +148,7 @@ endmodule
 module NorthInputQueue #(
     parameter N = 8,
     parameter DATA_WIDTH = 32,
+    parameter WRITE_WORDS = 1,
     parameter MEM_FILE = "weights.mem"
 ) (
     input logic clk_i,
@@ -152,7 +156,7 @@ module NorthInputQueue #(
     input logic start_i,
     input logic [N-1:0] top_edge_passthrough_valid_i,
     input logic write_enable_i,
-    input logic [DATA_WIDTH-1:0] write_data_i,
+    input logic [WRITE_WORDS-1:0][DATA_WIDTH-1:0] write_data_i,
     input logic write_reset_i,
     output logic [DATA_WIDTH-1:0] weight_out_north[0:N-1],
     output logic [N-1:0] last_o,
@@ -161,6 +165,7 @@ module NorthInputQueue #(
   ColumnInputQueue #(
       .N         (N),
       .DATA_WIDTH(DATA_WIDTH),
+      .WRITE_WORDS(WRITE_WORDS),
       .MEM_FILE  (MEM_FILE)
   ) north_queue_inst (
       .clk_i (clk_i),
@@ -184,6 +189,7 @@ endmodule
 module WestInputQueue #(
     parameter N = 8,
     parameter DATA_WIDTH = 32,
+    parameter WRITE_WORDS = 1,
     parameter MEM_FILE = "data.mem"
 ) (
     input logic clk_i,
@@ -191,7 +197,7 @@ module WestInputQueue #(
     input logic start_i,
     input logic [N-1:0] left_edge_passthrough_valid_i,
     input logic write_enable_i,
-    input logic [DATA_WIDTH-1:0] write_data_i,
+    input logic [WRITE_WORDS-1:0][DATA_WIDTH-1:0] write_data_i,
     input logic write_reset_i,
     output logic [DATA_WIDTH-1:0] data_out_west[0:N-1],
     output logic inputs_valid_o,
@@ -201,6 +207,7 @@ module WestInputQueue #(
   RowInputQueue #(
       .N         (N),
       .DATA_WIDTH(DATA_WIDTH),
+      .WRITE_WORDS(WRITE_WORDS),
       .MEM_FILE  (MEM_FILE)
   ) west_queue_inst (
       .clk_i (clk_i),

@@ -3,6 +3,7 @@
 module ColumnInputQueue #(
     parameter N          = 8,             // Systolic array dimension
     parameter DATA_WIDTH = 32,
+    parameter WRITE_WORDS = 1,  // words per write: 1, or N for one tile row per cycle
     parameter MEM_FILE   = "default.mem"
 ) (
     input logic clk_i,
@@ -12,7 +13,7 @@ module ColumnInputQueue #(
     input logic [N-1:0] passthrough_valid_i,
 
     input logic                  write_enable_i,
-    input logic [DATA_WIDTH-1:0] write_data_i,
+    input logic [WRITE_WORDS-1:0][DATA_WIDTH-1:0] write_data_i,
     input logic                  write_reset_i,
 
     output logic [DATA_WIDTH-1:0] data_o[0:N-1],
@@ -27,7 +28,7 @@ module ColumnInputQueue #(
 
   logic [DATA_WIDTH-1:0] sram[0:SRAM_DEPTH-1];
 
-  logic [$clog2(SRAM_DEPTH)-1:0] write_addr;
+  logic [$clog2(SRAM_DEPTH):0] write_addr;  // one bit wider: it reaches SRAM_DEPTH after the last write
 
   logic [$clog2(SRAM_DEPTH)-1:0] read_addr[0:N-1];
 
@@ -56,8 +57,8 @@ module ColumnInputQueue #(
       if (write_reset_i) begin
         write_addr <= '0;
       end else if (write_enable_i && write_addr < SRAM_DEPTH) begin
-        sram[write_addr] <= write_data_i;
-        write_addr <= write_addr + 1'b1;
+        for (int c = 0; c < WRITE_WORDS; c++) sram[int'(write_addr)+c] <= write_data_i[c];
+        write_addr <= write_addr + WRITE_WORDS;
       end
     end
   end
