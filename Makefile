@@ -47,6 +47,9 @@ TRACE ?= 1
 
 # ccache 3.7 here served corrupted objects that segfaulted at start-up; USE_CCACHE=1 opts back in.
 USE_CCACHE ?= 0
+
+# Very large meshes put thousands of PEs into a few generated functions that -Os takes hours on; OPT_FAST=-O0 builds in minutes.
+OPT_FAST ?= -Os
 ifeq ($(USE_CCACHE),0)
 export CCACHE_DISABLE := 1
 endif
@@ -61,6 +64,7 @@ VERILATOR_FLAGS = \
 	--output-split-cfuncs 20000 \
 	--output-groups 64 \
 	-Wno-UNOPTTHREADS \
+	-MAKEFLAGS OPT_FAST=$(OPT_FAST) \
 	--sv \
 	-I$(SRC_DIR) \
 	-I$(TB_DIR) \
