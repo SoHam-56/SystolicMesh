@@ -1,25 +1,25 @@
 `timescale 1ns / 100ps
 
+// Synchronous N x N output-stationary tile: C = A * B with A N x K and B K x N, both held locally.
+// Row r of A and column c of B enter r and c cycles late, and operands move one PE per cycle, so no handshake is needed.
 module SystolicArray #(
-    parameter N          = 8,
-    parameter DATA_WIDTH = 32,
-    parameter WRITE_WORDS = 1,  // queue words per write: 1, or N for one tile row per cycle
-    parameter ROWS       = "rows.mem",
-    parameter COLS       = "cols.mem"
+    parameter int N           = 4,
+    parameter int K           = N,  // depth of the product; N for a square tile
+    parameter int DATA_WIDTH  = 32,
+    parameter int WEST_WORDS  = K,  // A words per write: one row of A
+    parameter int NORTH_WORDS = N   // B words per write: one row of B
 ) (
     input logic clk_i,
     input logic rstn_i,
     input logic start_matrix_mult_i,
     input logic rearm_i,
 
-    input logic                  north_write_enable_i,
-    input logic [WRITE_WORDS-1:0][DATA_WIDTH-1:0] north_write_data_i,
-    input logic                  north_write_reset_i,
-
-    // West Queue Write interface
-    input logic                  west_write_enable_i,
-    input logic [WRITE_WORDS-1:0][DATA_WIDTH-1:0] west_write_data_i,
-    input logic                  west_write_reset_i,
+    input logic                                  north_write_enable_i,
+    input logic [NORTH_WORDS-1:0][DATA_WIDTH-1:0] north_write_data_i,
+    input logic                                  north_write_reset_i,
+    input logic                                  west_write_enable_i,
+    input logic [ WEST_WORDS-1:0][DATA_WIDTH-1:0] west_write_data_i,
+    input logic                                  west_write_reset_i,
 
     output logic north_queue_empty_o,
     output logic west_queue_empty_o,
@@ -33,198 +33,133 @@ module SystolicArray #(
     output logic collection_complete_o,
     output logic collection_active_o
 );
+  localparam int AD = N * K;  // A and B each hold N*K words
+  localparam int STEPS = K + N - 1;  // feed cycles: K products plus the skew of the last row or column
+  localparam int SCW = $clog2(STEPS + 1);
 
-  logic [DATA_WIDTH-1:0] south_o                     [0:N-1];
-  logic [DATA_WIDTH-1:0] east_o                      [0:N-1];
-  logic [DATA_WIDTH-1:0] weight_in_north             [0:N-1];
-  logic [DATA_WIDTH-1:0] data_in_west                [0:N-1];
-  logic                  inputs_valid;
-  logic                  passthrough_valid           [0:N-1] [0:N-1];
-  logic [         N-1:0] drain_o;
+  initial begin
+    if ((AD % WEST_WORDS) != 0 || (AD % NORTH_WORDS) != 0)
+      $error("SystolicArray: write widths %0d/%0d must divide %0d", WEST_WORDS, NORTH_WORDS, AD);
+  end
 
-  logic [         N-1:0] top_edge_passthrough_valid;
-  logic [         N-1:0] left_edge_passthrough_valid;
-  logic [N-1:0] last_row, last_col;
+  // A row-major (A[r][kk] at r*K+kk), B row-major (B[kk][c] at kk*N+c).
+  logic [DATA_WIDTH-1:0] a_mem[AD];
+  logic [DATA_WIDTH-1:0] b_mem[AD];
+  logic [$clog2(AD):0] wa, wb;
 
-  // Tie passthrough edges
-  always_comb begin
-    for (int i = 0; i < N; i++) begin
-      top_edge_passthrough_valid[i]  = passthrough_valid[0][i];
-      left_edge_passthrough_valid[i] = passthrough_valid[i][0];
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      wa <= '0;
+      wb <= '0;
+    end else begin
+      if (west_write_reset_i) wa <= '0;
+      else if (west_write_enable_i && wa < AD) begin
+        for (int c = 0; c < WEST_WORDS; c++) a_mem[int'(wa)+c] <= west_write_data_i[c];
+        wa <= wa + WEST_WORDS;
+      end
+      if (north_write_reset_i) wb <= '0;
+      else if (north_write_enable_i && wb < AD) begin
+        for (int c = 0; c < NORTH_WORDS; c++) b_mem[int'(wb)+c] <= north_write_data_i[c];
+        wb <= wb + NORTH_WORDS;
+      end
+    end
+  end
+  assign west_queue_empty_o  = (wa == 0);
+  assign north_queue_empty_o = (wb == 0);
+
+  // Skewed feed: at step s, row r takes A[r][s-r] and column c takes B[s-c][c] when that index is in range.
+  logic feeding;
+  logic [SCW-1:0] s;
+  logic [DATA_WIDTH-1:0] a_feed[N], b_feed[N];
+  logic v_feed[N];
+
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      feeding <= 1'b0;
+      s <= '0;
+      for (int r = 0; r < N; r++) begin
+        a_feed[r] <= '0;
+        b_feed[r] <= '0;
+        v_feed[r] <= 1'b0;
+      end
+    end else begin
+      if (start_matrix_mult_i) begin
+        feeding <= 1'b1;
+        s <= '0;
+      end else if (feeding) begin
+        if (s == SCW'(STEPS - 1)) feeding <= 1'b0;
+        s <= s + 1'b1;
+      end
+      for (int r = 0; r < N; r++) begin
+        automatic int kk = int'(s) - r;
+        automatic bit live = feeding && !start_matrix_mult_i && kk >= 0 && kk < K;
+        v_feed[r] <= live;
+        a_feed[r] <= live ? a_mem[r*K+kk] : '0;
+        b_feed[r] <= live ? b_mem[kk*N+r] : '0;  // column r of B
+      end
     end
   end
 
-  NorthInputQueue #(
-      .N         (N),
-      .DATA_WIDTH(DATA_WIDTH),
-      .WRITE_WORDS(WRITE_WORDS),
-      .MEM_FILE  (COLS)
-  ) north_queue (
-      .clk_i (clk_i),
-      .rstn_i(rstn_i),
+  logic [DATA_WIDTH-1:0] a_w[N][N+1];  // a_w[r][c] enters PE(r,c) from the west
+  logic [DATA_WIDTH-1:0] b_n[N+1][N];  // b_n[r][c] enters PE(r,c) from the north
+  logic v_w[N][N+1];
+  logic [DATA_WIDTH-1:0] res[N][N];
+  logic [N*N-1:0] pe_done;
 
-      .start_i                     (start_matrix_mult_i),
-      .top_edge_passthrough_valid_i(top_edge_passthrough_valid),
+  for (genvar r = 0; r < N; r++) begin : FEED
+    assign a_w[r][0] = a_feed[r];
+    assign v_w[r][0] = v_feed[r];
+    assign b_n[0][r] = b_feed[r];
+  end
 
-      .write_enable_i(north_write_enable_i),
-      .write_data_i  (north_write_data_i),
-      .write_reset_i (north_write_reset_i),
+  for (genvar r = 0; r < N; r++) begin : ROW
+    for (genvar c = 0; c < N; c++) begin : COL
+      logic unused_v;
+      ProcessingElement #(
+          .DATA_WIDTH(DATA_WIDTH),
+          .K         (K)
+      ) pe (
+          .clk_i   (clk_i),
+          .rstn_i  (rstn_i),
+          .start_i (start_matrix_mult_i),
+          .a_i     (a_w[r][c]),
+          .b_i     (b_n[r][c]),
+          .v_i     (v_w[r][c]),
+          .a_o     (a_w[r][c+1]),
+          .b_o     (b_n[r+1][c]),
+          .v_o     (v_w[r][c+1]),
+          .result_o(res[r][c]),
+          .done_o  (pe_done[r*N+c])
+      );
+    end
+  end
 
-      .weight_out_north(weight_in_north),
+  // Complete once every PE has its sum, until the mesh re-arms for the next set.
+  logic ran;
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) ran <= 1'b0;
+    else if (start_matrix_mult_i) ran <= 1'b1;
+    else if (rearm_i) ran <= 1'b0;
+  end
+  assign collection_complete_o  = ran && (&pe_done);
+  assign collection_active_o    = ran && !(&pe_done);
+  assign matrix_mult_complete_o = collection_complete_o;
 
-      .last_o       (last_col),
-      .queue_empty_o(north_queue_empty_o)
-  );
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      read_data_o  <= '0;
+      read_valid_o <= 1'b0;
+    end else begin
+      read_valid_o <= read_enable_i;
+      if (read_enable_i) read_data_o <= res[read_addr_i/N][read_addr_i%N];
+    end
+  end
 
-  WestInputQueue #(
-      .N         (N),
-      .DATA_WIDTH(DATA_WIDTH),
-      .WRITE_WORDS(WRITE_WORDS),
-      .MEM_FILE  (ROWS)
-  ) west_queue (
-      .clk_i (clk_i),
-      .rstn_i(rstn_i),
-
-      .start_i                      (start_matrix_mult_i),
-      .left_edge_passthrough_valid_i(left_edge_passthrough_valid),
-
-      .write_enable_i(west_write_enable_i),
-      .write_data_i  (west_write_data_i),
-      .write_reset_i (west_write_reset_i),
-
-      .data_out_west (data_in_west),
-      .inputs_valid_o(inputs_valid),
-
-      .last_o       (last_row),
-      .queue_empty_o(west_queue_empty_o)
-  );
-
-  PEMesh #(
-      .N         (N),
-      .DATA_WIDTH(DATA_WIDTH)
-  ) systolic_array_inst (
-      .clk_i (clk_i),
-      .rstn_i(rstn_i),
-      .rearm_i(rearm_i),
-
-      .north_i(weight_in_north),
-      .west_i (data_in_west),
-
-      .inputs_valid_i(inputs_valid),
-      .last_element_i(last_row[N-1]),
-
-      .south_o(south_o),
-      .east_o (east_o),
-
-      .passthrough_valid_o(passthrough_valid),
-      .done_o             (matrix_mult_complete_o),
-      .drain_o            (drain_o)
-  );
-
-  OutputSram #(
-      .N         (N),
-      .DATA_WIDTH(DATA_WIDTH),
-      .SRAM_DEPTH(N * N)
-  ) output_sram_inst (
-      .clk_i (clk_i),
-      .rstn_i(rstn_i),
-
-      .data_i                (east_o),
-      .drain_i               (drain_o),
-      .matrix_mult_complete_i(matrix_mult_complete_o),
-      .rearm_i               (rearm_i),
-
-      .read_enable_i(read_enable_i),
-      .read_addr_i  (read_addr_i),
-      .read_data_o  (read_data_o),
-      .read_valid_o (read_valid_o),
-
-      .collection_complete_o(collection_complete_o),
-      .collection_active_o  (collection_active_o)
-  );
+`ifndef SYNTHESIS
+  a_start_idle: assert property (@(posedge clk_i) disable iff (!rstn_i) start_matrix_mult_i |-> !feeding)
+    else $error("SystolicArray: started while still feeding the previous matmul");
+  a_loaded: assert property (@(posedge clk_i) disable iff (!rstn_i) start_matrix_mult_i |-> (wa == AD && wb == AD))
+    else $error("SystolicArray: started before both operands were fully written");
+`endif
 
 endmodule
-
-module NorthInputQueue #(
-    parameter N = 8,
-    parameter DATA_WIDTH = 32,
-    parameter WRITE_WORDS = 1,
-    parameter MEM_FILE = "weights.mem"
-) (
-    input logic clk_i,
-    input logic rstn_i,
-    input logic start_i,
-    input logic [N-1:0] top_edge_passthrough_valid_i,
-    input logic write_enable_i,
-    input logic [WRITE_WORDS-1:0][DATA_WIDTH-1:0] write_data_i,
-    input logic write_reset_i,
-    output logic [DATA_WIDTH-1:0] weight_out_north[0:N-1],
-    output logic [N-1:0] last_o,
-    output logic queue_empty_o
-);
-  ColumnInputQueue #(
-      .N         (N),
-      .DATA_WIDTH(DATA_WIDTH),
-      .WRITE_WORDS(WRITE_WORDS),
-      .MEM_FILE  (MEM_FILE)
-  ) north_queue_inst (
-      .clk_i (clk_i),
-      .rstn_i(rstn_i),
-
-      .start_i            (start_i),
-      .passthrough_valid_i(top_edge_passthrough_valid_i),
-
-      .write_enable_i(write_enable_i),
-      .write_data_i  (write_data_i),
-      .write_reset_i (write_reset_i),
-
-      .data_o      (weight_out_north),
-      .data_valid_o(),
-
-      .last_o       (last_o),
-      .queue_empty_o(queue_empty_o)
-  );
-endmodule
-
-module WestInputQueue #(
-    parameter N = 8,
-    parameter DATA_WIDTH = 32,
-    parameter WRITE_WORDS = 1,
-    parameter MEM_FILE = "data.mem"
-) (
-    input logic clk_i,
-    input logic rstn_i,
-    input logic start_i,
-    input logic [N-1:0] left_edge_passthrough_valid_i,
-    input logic write_enable_i,
-    input logic [WRITE_WORDS-1:0][DATA_WIDTH-1:0] write_data_i,
-    input logic write_reset_i,
-    output logic [DATA_WIDTH-1:0] data_out_west[0:N-1],
-    output logic inputs_valid_o,
-    output logic [N-1:0] last_o,
-    output logic queue_empty_o
-);
-  RowInputQueue #(
-      .N         (N),
-      .DATA_WIDTH(DATA_WIDTH),
-      .WRITE_WORDS(WRITE_WORDS),
-      .MEM_FILE  (MEM_FILE)
-  ) west_queue_inst (
-      .clk_i (clk_i),
-      .rstn_i(rstn_i),
-
-      .start_i            (start_i),
-      .passthrough_valid_i(left_edge_passthrough_valid_i),
-
-      .write_enable_i(write_enable_i),
-      .write_data_i  (write_data_i),
-      .write_reset_i (write_reset_i),
-
-      .data_o      (data_out_west),
-      .data_valid_o(inputs_valid_o),
-
-      .last_o       (last_o),
-      .queue_empty_o(queue_empty_o)
-  );
-endmodule
-

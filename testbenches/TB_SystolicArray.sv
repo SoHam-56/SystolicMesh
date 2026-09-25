@@ -1,504 +1,146 @@
 `timescale 1ns / 100ps
 
-module TB_SystolicArray;
+// Unit test for SystolicArray: random N x K by K x N products, several sets back to back, each checked against a real-valued model.
+module TB_SystolicArray #(
+    parameter int N     = 4,
+    parameter int K     = 4,
+    parameter int NSETS = 6
+);
+  localparam int DW = 32;
 
-  localparam N = 4;
-  localparam DATA_WIDTH = 32;
-  localparam CLK_PERIOD = 10;
-  localparam SRAM_DEPTH = N * N;
+  logic clk = 0, rstn = 0;
+  always #5 clk = ~clk;
 
-  localparam int NUM_TEST_SETS = 3;
-
-  // Tolerance configuration
-  localparam TOLERANCE_MODE = "RELATIVE";  // "ABSOLUTE", "RELATIVE", or "BOTH"
-  localparam real ABSOLUTE_TOLERANCE = 1.0;
-  localparam real RELATIVE_TOLERANCE = 0.05;
-  localparam logic ENABLE_TOLERANCE = 1'b1;  // Enable/disable tolerance checking
-
-  localparam DEFAULT_INPUT_A = "matrixA.mem";
-  localparam DEFAULT_INPUT_B = "matrixB.mem";
-
-  // Global Counters
-  integer test_pass_count = 0;
-  integer test_fail_count = 0;
-  integer total_tests = 0;
-  integer tolerance_pass_count = 0;  // Tests that passed due to tolerance
-
-  reg clk;
-  reg rstn;
-  reg start_matrix_mult;
-
-  reg north_write_enable;
-  reg [DATA_WIDTH-1:0] north_write_data;
-  reg north_write_reset;
-
-  reg west_write_enable;
-  reg [DATA_WIDTH-1:0] west_write_data;
-  reg west_write_reset;
-
-  wire north_queue_empty_o;
-  wire west_queue_empty_o;
-  wire matrix_mult_complete_o;
-
-  // OutputSram interface signals
-  reg read_enable;
-  reg [$clog2(SRAM_DEPTH)-1:0] read_addr;
-  wire [DATA_WIDTH-1:0] read_data;
-  wire read_valid;
-  wire collection_complete;
-  wire collection_active;
-
-  reg [DATA_WIDTH-1:0] expected_result[0:N-1][0:N-1];
-
-  string test_name = "OutputSram Matrix Test";
-
-  initial begin
-    clk = 0;
-    forever #(CLK_PERIOD / 2) clk = ~clk;
-  end
+  logic start = 0, rearm = 0;
+  logic n_we = 0, w_we = 0, n_rst = 0, w_rst = 0;
+  logic [N-1:0][DW-1:0] n_data = '0;
+  logic [K-1:0][DW-1:0] w_data = '0;
+  logic rd_en = 0;
+  logic [$clog2(N*N)-1:0] rd_addr = '0;
+  logic [DW-1:0] rd_data;
+  logic rd_valid, complete, active, mm_done, n_empty, w_empty;
 
   SystolicArray #(
-      .N(N),
-      .DATA_WIDTH(DATA_WIDTH),
-      .ROWS(DEFAULT_INPUT_A),
-      .COLS(DEFAULT_INPUT_B)
+      .N          (N),
+      .K          (K),
+      .DATA_WIDTH (DW),
+      .WEST_WORDS (K),
+      .NORTH_WORDS(N)
   ) dut (
-      .clk_i(clk),
-      .rstn_i(rstn),
-      .start_matrix_mult_i(start_matrix_mult),
-
-      .north_write_enable_i(north_write_enable),
-      .north_write_data_i  (north_write_data),
-      .north_write_reset_i (north_write_reset),
-
-      .west_write_enable_i(west_write_enable),
-      .west_write_data_i  (west_write_data),
-      .west_write_reset_i (west_write_reset),
-
-      .north_queue_empty_o(north_queue_empty_o),
-      .west_queue_empty_o(west_queue_empty_o),
-      .matrix_mult_complete_o(matrix_mult_complete_o),
-
-      .read_enable_i(read_enable),
-      .read_addr_i  (read_addr),
-      .read_data_o  (read_data),
-      .read_valid_o (read_valid),
-
-      .collection_complete_o(collection_complete),
-      .collection_active_o  (collection_active)
+      .clk_i                 (clk),
+      .rstn_i                (rstn),
+      .start_matrix_mult_i   (start),
+      .rearm_i               (rearm),
+      .north_write_enable_i  (n_we),
+      .north_write_data_i    (n_data),
+      .north_write_reset_i   (n_rst),
+      .west_write_enable_i   (w_we),
+      .west_write_data_i     (w_data),
+      .west_write_reset_i    (w_rst),
+      .north_queue_empty_o   (n_empty),
+      .west_queue_empty_o    (w_empty),
+      .matrix_mult_complete_o(mm_done),
+      .read_enable_i         (rd_en),
+      .read_addr_i           (rd_addr),
+      .read_data_o           (rd_data),
+      .read_valid_o          (rd_valid),
+      .collection_complete_o (complete),
+      .collection_active_o   (active)
   );
 
-  function automatic logic check_tolerance(
-      input [DATA_WIDTH-1:0] expected, input [DATA_WIDTH-1:0] actual, output string tolerance_info);
-    real expected_real, actual_real;
-    real abs_diff, rel_diff;
-    logic abs_within_tolerance, rel_within_tolerance;
-    logic result;
-
-    // Convert to real for tolerance calculations
-    expected_real = $signed(expected);
-    actual_real = $signed(actual);
-
-    // Calculate absolute difference
-    abs_diff = (expected_real > actual_real) ? (expected_real - actual_real) : (actual_real - expected_real);
-
-    // Calculate relative difference (avoid division by zero)
-    if (expected_real != 0.0) begin
-      rel_diff = abs_diff / ((expected_real > 0) ? expected_real : -expected_real);
-    end else begin
-      rel_diff = (actual_real == 0.0) ? 0.0 : 1.0;
-    end
-
-    abs_within_tolerance = (abs_diff <= ABSOLUTE_TOLERANCE);
-    rel_within_tolerance = (rel_diff <= RELATIVE_TOLERANCE);
-
-    case (TOLERANCE_MODE)
-      "ABSOLUTE": result = abs_within_tolerance;
-      "RELATIVE": result = rel_within_tolerance;
-      "BOTH": result = abs_within_tolerance && rel_within_tolerance;
-      default: result = abs_within_tolerance;
-    endcase
-
-    tolerance_info = $sformatf(
-        "AbsDiff=%.3f(%.3f), RelDiff=%.3f%%(%.1f%%)",
-        abs_diff,
-        ABSOLUTE_TOLERANCE,
-        rel_diff * 100.0,
-        RELATIVE_TOLERANCE * 100.0
-    );
-
-    return result;
+  function automatic real f32(input logic [31:0] b);
+    int e;
+    real m, v;
+    e = int'(b[30:23]);
+    m = real'(longint'(b[22:0])) / 8388608.0;
+    if (e == 255) v = 1.0e38;
+    else if (e == 0) v = 0.0;
+    else v = (1.0 + m) * (2.0 ** (e - 127));
+    return b[31] ? -v : v;
   endfunction
 
-  task initialize_signals();
-    begin
-      rstn = 0;
-      start_matrix_mult = 0;
+  // Random fp32 with magnitude in [2^-7, 2): varied exponents, random sign and mantissa.
+  function automatic logic [31:0] rnd();
+    logic [7:0] e;
+    e = 8'(120 + ($urandom % 8));
+    return {1'($urandom), e, 23'($urandom)};
+  endfunction
 
-      north_write_enable = 0;
-      north_write_data = 0;
-      north_write_reset = 0;
-
-      west_write_enable = 0;
-      west_write_data = 0;
-      west_write_reset = 0;
-
-      read_enable = 0;
-      read_addr = 0;
-
-      if (total_tests == 0) begin  // Only print config once
-        $display("Tolerance Configuration:");
-        $display("  Mode: %s", TOLERANCE_MODE);
-        $display("  Absolute Tolerance: %.6f", ABSOLUTE_TOLERANCE);
-        $display("  Relative Tolerance: %.2f%%", RELATIVE_TOLERANCE * 100.0);
-        $display("  Tolerance Enabled: %s\n", ENABLE_TOLERANCE ? "YES" : "NO");
-      end
-    end
-  endtask
-
-  task apply_reset();
-    begin
-      $display("Applying reset sequence...");
-      rstn = 0;
-      repeat (5) @(posedge clk);
-      rstn = 1;
-      repeat (5) @(posedge clk);
-      $display("Reset sequence completed.");
-    end
-  endtask
-
-  task write_file_to_north(input string filename);
-    integer file_handle;
-    integer scan_result;
-    reg [DATA_WIDTH-1:0] temp_data;
-    integer data_count;
-    begin
-      $display("Writing data from file %s to North Queue...", filename);
-
-      file_handle = $fopen(filename, "r");
-      if (file_handle == 0) begin
-        $display("ERROR: Could not open file: %s", filename);
-        $finish;
-      end
-
-      // Reset write pointer
-      north_write_reset = 1;
-      @(posedge clk);
-      north_write_reset = 0;
-      @(posedge clk);
-
-      data_count = 0;
-      while (!$feof(
-          file_handle
-      )) begin
-        scan_result = $fscanf(file_handle, "%h", temp_data);
-        if (scan_result == 1) begin
-          north_write_enable = 1;
-          north_write_data   = temp_data;
-          @(posedge clk);
-          data_count++;
-        end
-      end
-
-      north_write_enable = 0;
-      @(posedge clk);
-      $fclose(file_handle);
-      $display("Written %0d values from %s to north queue", data_count, filename);
-    end
-  endtask
-
-  task write_file_to_west(input string filename);
-    integer file_handle;
-    integer scan_result;
-    reg [DATA_WIDTH-1:0] temp_data;
-    integer data_count;
-    begin
-      $display("Writing data from file %s to West Queue...", filename);
-
-      file_handle = $fopen(filename, "r");
-      if (file_handle == 0) begin
-        $display("ERROR: Could not open file: %s", filename);
-        $finish;
-      end
-
-      // Reset write pointer
-      west_write_reset = 1;
-      @(posedge clk);
-      west_write_reset = 0;
-      @(posedge clk);
-
-      data_count = 0;
-      while (!$feof(
-          file_handle
-      )) begin
-        scan_result = $fscanf(file_handle, "%h", temp_data);
-        if (scan_result == 1) begin
-          west_write_enable = 1;
-          west_write_data   = temp_data;
-          @(posedge clk);
-          data_count++;
-        end
-      end
-
-      west_write_enable = 0;
-      @(posedge clk);
-      $fclose(file_handle);
-      $display("Written %0d values from %s to west queue", data_count, filename);
-    end
-  endtask
-
-  task load_expected_results(input string filename);
-    integer file_handle;
-    integer scan_result;
-    integer row, col;
-    reg [DATA_WIDTH-1:0] temp_data;
-    integer data_count;
-    begin
-      $display("Loading expected results from file: %s", filename);
-
-      file_handle = $fopen(filename, "r");
-      if (file_handle == 0) begin
-        $display("ERROR: Could not open expected output file: %s", filename);
-        $finish;
-      end
-
-      data_count = 0;
-      for (row = 0; row < N; row++) begin
-        for (col = 0; col < N; col++) begin
-          scan_result = $fscanf(file_handle, "%h", temp_data);
-          if (scan_result != 1) begin
-            $display("ERROR: Failed to read expected data at position [%0d][%0d]", row, col);
-            $fclose(file_handle);
-            $finish;
-          end
-          expected_result[row][col] = temp_data;
-          data_count++;
-        end
-      end
-
-      $fclose(file_handle);
-      $display("Successfully loaded %0d expected values from %s", data_count, filename);
-    end
-  endtask
-
-  task wait_for_output_sram_collection();
-    begin
-      $display("Waiting for OutputSram to complete data collection...");
-
-      while (!collection_active) begin
-        @(posedge clk);
-      end
-      $display("OutputSram collection started...");
-
-      while (!collection_complete) begin
-        @(posedge clk);
-      end
-      $display("OutputSram collection completed!");
-    end
-  endtask
-
-  task verify_output_sram_results(input int test_idx);
-    logic exact_match, tolerance_match;
-    string tolerance_info;
-    reg [DATA_WIDTH-1:0] actual_result;
-    integer sram_addr;
-    begin
-      $display("--- Verifying OutputSram Results (Set %0d) ---", test_idx);
-
-      for (int i = 0; i < N; i++) begin
-        for (int j = 0; j < N; j++) begin
-          total_tests++;
-
-          sram_addr   = i * N + j;
-
-          read_enable = 1;
-          read_addr   = sram_addr;
-          @(posedge clk);
-
-          while (!read_valid) begin
-            @(posedge clk);
-          end
-
-          actual_result = read_data;
-          read_enable   = 0;
-          @(posedge clk);
-
-          exact_match = (actual_result == expected_result[i][j]);
-
-          if (!exact_match && ENABLE_TOLERANCE) begin
-            tolerance_match = check_tolerance(expected_result[i][j], actual_result, tolerance_info);
-          end else begin
-            tolerance_match = 1'b0;
-            tolerance_info  = "N/A";
-          end
-
-          if (exact_match || tolerance_match) begin
-            if (exact_match) begin
-              // Commented out to reduce spam for large runs, uncomment if needed
-              // $display("PASS: [%0d][%0d] Expected: 0x%08x, Actual: 0x%08x [EXACT]", i, j, expected_result[i][j], actual_result);
-            end else begin
-              $display(
-                  "PASS: Result[%0d][%0d] (SRAM[%0d]) - Expected: 0x%08x (%0d), Actual: 0x%08x (%0d) [TOLERANCE: %s]",
-                  i, j, sram_addr, expected_result[i][j], $signed(expected_result[i][j]),
-                  actual_result, $signed(actual_result), tolerance_info);
-              tolerance_pass_count++;
-            end
-            test_pass_count++;
-          end else begin
-            if (ENABLE_TOLERANCE) begin
-              $display(
-                  "FAIL: Result[%0d][%0d] (SRAM[%0d]) - Expected: 0x%08x (%0d), Actual: 0x%08x (%0d) [TOLERANCE: %s]",
-                  i, j, sram_addr, expected_result[i][j], $signed(expected_result[i][j]),
-                  actual_result, $signed(actual_result), tolerance_info);
-            end else begin
-              $display(
-                  "FAIL: Result[%0d][%0d] (SRAM[%0d]) - Expected: 0x%08x (%0d), Actual: 0x%08x (%0d)",
-                  i, j, sram_addr, expected_result[i][j], $signed(expected_result[i][j]),
-                  actual_result, $signed(actual_result));
-            end
-            test_fail_count++;
-          end
-        end
-      end
-    end
-  endtask
-
-  task display_output_sram_contents();
-    reg [DATA_WIDTH-1:0] sram_data;
-    integer sram_addr;
-    begin
-      $display("--- OutputSram Contents Preview (First Row) ---");
-      // Only showing first row to avoid log explosion in multi-test mode
-      for (int i = 0; i < 1; i++) begin
-        $write("Row %0d: ", i);
-        for (int j = 0; j < N; j++) begin
-          sram_addr   = i * N + j;
-
-          read_enable = 1;
-          read_addr   = sram_addr;
-          @(posedge clk);
-
-          while (!read_valid) begin
-            @(posedge clk);
-          end
-
-          sram_data   = read_data;
-          read_enable = 0;
-          @(posedge clk);
-
-          $write("0x%08x ", sram_data);
-        end
-        $write("\n");
-      end
-      $display("... (remaining rows hidden)");
-    end
-  endtask
-
-  task execute_output_sram_matrix_test(input string file_a, input string file_b,
-                                       input string file_c, input int test_idx);
-    begin
-      $display("\n=== %s (Set %0d) ===", test_name, test_idx);
-      $display("Input A file: %s", file_a);
-      $display("Input B file: %s", file_b);
-      $display("Expected output file: %s", file_c);
-
-      load_expected_results(file_c);
-
-      apply_reset();
-
-      fork
-        write_file_to_west(file_a);
-        write_file_to_north(file_b);
-      join
-
-      repeat (10) @(posedge clk);
-
-      $display("Starting matrix multiplication...");
-      start_matrix_mult = 1;
-      @(posedge clk);
-      start_matrix_mult = 0;
-
-      wait_for_output_sram_collection();
-
-      // Optional: Display contents (restricted to 1st row inside task to save space)
-      // display_output_sram_contents(); 
-
-      verify_output_sram_results(test_idx);
-
-      $display("=== Set %0d COMPLETED ===\n", test_idx);
-    end
-  endtask
-
-  task print_global_summary();
-    automatic real pass_rate = (total_tests > 0) ? (test_pass_count * 100.0) / total_tests : 0.0;
-    automatic
-    real
-    tolerance_rate = (test_pass_count > 0) ? (tolerance_pass_count * 100.0) / test_pass_count : 0.0;
-    begin
-      $display("\n" + "=" * 60);
-      $display("SYSTOLIC ARRAY MULTI-SET TEST SUMMARY");
-      $display("=" * 60);
-      $display("Total Sets Run: %0d", NUM_TEST_SETS);
-      $display("-" * 60);
-      $display("GLOBAL RESULTS:");
-      $display("  Total Matrix Elements Checked: %0d", total_tests);
-      $display("  Passed: %0d", test_pass_count);
-      $display("  Failed: %0d", test_fail_count);
-      $display("  Pass Rate: %.1f%%", pass_rate);
-      if (ENABLE_TOLERANCE && tolerance_pass_count > 0) begin
-        $display("  Tolerance Passes: %0d (%.1f%% of passes)", tolerance_pass_count,
-                 tolerance_rate);
-        $display("  Exact Matches: %0d", test_pass_count - tolerance_pass_count);
-      end
-      $display("  STATUS: %s", (test_fail_count == 0) ? "ALL TESTS PASSED!" : $sformatf
-               ("%0d TEST(S) FAILED!", test_fail_count));
-      $display("=" * 60);
-    end
-  endtask
+  logic [DW-1:0] A[N][K], B[K][N];
+  int failed = 0, checked = 0, cycles, worst_cycles = 0;
 
   initial begin
-    string current_file_a;
-    string current_file_b;
-    string current_file_c;
-
-    $display("Testing SystolicArray module with integrated OutputSram");
-    $display("Number of Test Sets: %0d\n", NUM_TEST_SETS);
-
-    initialize_signals();
-
-    for (int i = 0; i < NUM_TEST_SETS; i++) begin
-
-      if (NUM_TEST_SETS == 1) begin
-        // Legacy/Single mode: no suffix
-        current_file_a = "matrixA.mem";
-        current_file_b = "matrixB.mem";
-        current_file_c = "matrixC.mem";
-      end else begin
-        // Multi-mode: use suffix _0, _1, etc.
-        current_file_a = $sformatf("matrixA_%0d.mem", i);
-        current_file_b = $sformatf("matrixB_%0d.mem", i);
-        current_file_c = $sformatf("matrixC_%0d.mem", i);
+    repeat (3) @(posedge clk) #1;
+    rstn = 1;
+    repeat (2) @(posedge clk) #1;
+    for (int set = 0; set < NSETS; set++) begin
+      for (int r = 0; r < N; r++) for (int kk = 0; kk < K; kk++) A[r][kk] = rnd();
+      for (int kk = 0; kk < K; kk++) for (int c = 0; c < N; c++) B[kk][c] = rnd();
+      // Re-arm and rewind as the mesh does, then write one row per cycle.
+      rearm = 1; n_rst = 1; w_rst = 1;
+      @(posedge clk) #1;
+      rearm = 0; n_rst = 0; w_rst = 0;
+      @(posedge clk) #1;
+      if (set > 0 && complete) begin
+        failed++;
+        $display("  [FAIL] set %0d: collection_complete_o still high after re-arm", set);
       end
-
-      execute_output_sram_matrix_test(current_file_a, current_file_b, current_file_c, i);
-
-      repeat (10) @(posedge clk);
+      for (int r = 0; r < N; r++) begin
+        w_we = 1;
+        for (int kk = 0; kk < K; kk++) w_data[kk] = A[r][kk];
+        @(posedge clk) #1;
+      end
+      w_we = 0;
+      for (int kk = 0; kk < K; kk++) begin
+        n_we = 1;
+        for (int c = 0; c < N; c++) n_data[c] = B[kk][c];
+        @(posedge clk) #1;
+      end
+      n_we = 0;
+      start = 1;
+      @(posedge clk) #1;
+      start = 0;
+      cycles = 1;
+      if (complete) begin
+        failed++;
+        $display("  [FAIL] set %0d: complete the cycle after start", set);
+      end
+      while (!complete && cycles < 5000) begin
+        @(posedge clk) #1;
+        cycles++;
+      end
+      if (!complete) begin
+        failed++;
+        $display("  [FAIL] set %0d: no completion in 5000 cycles", set);
+        break;
+      end
+      if (cycles > worst_cycles) worst_cycles = cycles;
+      for (int p = 0; p < N * N; p++) begin
+        automatic real gold = 0.0, mag = 0.0, got, err;
+        rd_en = 1;
+        rd_addr = p[$clog2(N*N)-1:0];
+        @(posedge clk) #1;
+        rd_en = 0;
+        @(negedge clk);
+        for (int kk = 0; kk < K; kk++) begin
+          gold += f32(A[p/N][kk]) * f32(B[kk][p%N]);
+          mag += (f32(A[p/N][kk]) * f32(B[kk][p%N])) < 0 ? -(f32(A[p/N][kk]) * f32(B[kk][p%N])) : f32(A[p/N][kk]) * f32(B[kk][p%N]);
+        end
+        got = f32(rd_data);
+        err = (got > gold) ? got - gold : gold - got;
+        checked++;
+        if (!rd_valid || err > 1.0e-5 * mag + 1.0e-12) begin
+          failed++;
+          if (failed < 10)
+            $display("  [FAIL] set %0d pixel %0d: got %h (%f) expected %f, err %e, sum|ab| %f", set, p, rd_data, got, gold, err, mag);
+        end
+      end
+      $display("  set %0d: %0d cycles from start to complete", set, cycles);
     end
-
-    print_global_summary();
+    $display("SystolicArray N=%0d K=%0d: %0d pixels checked, %0d failed, worst %0d cycles", N, K, checked, failed, worst_cycles);
+    // A ternary of two strings prints as a number under Verilator, so branch instead.
+    if (failed == 0 && checked == NSETS * N * N) $display("RESULT: PASSED");
+    else $display("RESULT: FAILED");
     $finish;
   end
-
-  initial begin
-    #20000000;
-    $display("ERROR: Testbench timeout!");
-    print_global_summary();
-    $finish;
-  end
-
-  initial begin
-    $dumpfile("TB_SystolicArray.vcd");
-    $dumpvars(0, TB_SystolicArray);
-  end
-
 endmodule

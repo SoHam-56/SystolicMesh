@@ -1,239 +1,161 @@
 `timescale 1ns / 100ps
 
+// Output-stationary PE for SystolicArray: takes one product every cycle and passes its operands on a cycle later.
+// Products rotate through S partial sums so an add never waits on the previous one; the partials are summed at the end.
 module ProcessingElement #(
-    parameter DATA_WIDTH = 32
+    parameter int DATA_WIDTH = 32,
+    parameter int K          = 4    // products per matmul
 ) (
-    input wire clk_i,
-    input wire rstn_i,
-
-    // Data inputs from neighboring PEs
-    input wire [DATA_WIDTH - 1:0] north_i,
-    input wire [DATA_WIDTH - 1:0] west_i,
-
-    input wire inputs_valid_i,
-    input wire last_element_i,
-
-    input wire select_accumulator_i,  // 1: output accumulator, 0: output data passthrough
-    input wire accumulator_valid_i,   // Accumulator content of neighbour indicator
-
-    output reg [DATA_WIDTH - 1:0] south_o,  // Pass data to south PE
-    output reg [DATA_WIDTH - 1:0] east_o,   // Muxed: data passthrough OR accumulator output
-
-    output reg passthrough_valid_o,  // Valid for south_o and east_o (passthrough mode)
-    output reg fwd_valid_o,          // Same data, released as soon as it is buffered
-    output wire accept_o,            // High on the cycle this PE takes its inputs
-    output wire idle_o,              // High when this PE has no element in flight
-    output reg accumulator_valid_o,  // Valid for east_o when in accumulator mode
-    output reg last_element_east_o
+    input  logic                  clk_i,
+    input  logic                  rstn_i,
+    input  logic                  start_i,   // clears the sums for a new matmul
+    input  logic [DATA_WIDTH-1:0] a_i,
+    input  logic [DATA_WIDTH-1:0] b_i,
+    input  logic                  v_i,
+    output logic [DATA_WIDTH-1:0] a_o,
+    output logic [DATA_WIDTH-1:0] b_o,
+    output logic                  v_o,
+    output logic [DATA_WIDTH-1:0] result_o,
+    output logic                  done_o
 );
+  localparam int ADD_LAT = 5;  // fp32Adder: valid_i at t, done_o at t+5
+  localparam int S = ADD_LAT + 1;  // a slot's sum is written back S cycles after its add issues
+  localparam int U = (K < S) ? K : S;  // partial sums actually used
+  localparam int SW = $clog2(S);
+  localparam int CW = $clog2(K + 1);
 
-  reg [DATA_WIDTH - 1:0] buffered_north;
-  reg [DATA_WIDTH - 1:0] buffered_west;
-  reg [DATA_WIDTH - 1:0] buffered_accumulator;
-
-  wire [DATA_WIDTH - 1:0] mac_result;
-  wire mac_done;
-  wire mac_ready;
-  wire mac_busy;
-  reg mac_start;
-
-  wire select_accumulator_gated;
-
-  reg last_element_captured;  // Track last element processing
-
-  reg accumulator_drain_flag; // Track if we came to OUTPUT state from IDLE due to accumulator_valid_i
-
-  wire last_element_pulse;
-  assign last_element_pulse = mac_done & last_element_captured;
-
-  // FORWARD releases the passthrough operands to the neighbours before the MAC finishes.
-  // Neither south_o nor east_o depends on mac_result, so holding them until OUTPUT made the
-  // whole wavefront advance one PE per MAC instead of one PE per hop.
-  typedef enum reg [2:0] {
-    IDLE        = 3'b000,
-    LOAD_DATA   = 3'b001,
-    FORWARD     = 3'b010,
-    MAC_COMPUTE = 3'b011,
-    OUTPUT      = 3'b100
-  } state_t;
-
-  state_t current_state, next_state;
-
-  assign select_accumulator_gated = select_accumulator_i & (current_state == IDLE);
-
-  // The upstream join holds its valid until accept_o fires, so a forward is never dropped while
-  // this PE is busy. idle_o lets the mesh hold the drain wave until every PE has finished,
-  // which the wave's one-cycle-per-column sweep otherwise assumes.
-  assign accept_o = (current_state == IDLE) & inputs_valid_i;
-  assign idle_o   = (current_state == IDLE) & ~mac_busy;  // the accumulator must be final too
-
-  always @(posedge clk_i or negedge rstn_i) begin
+  always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
-      current_state <= IDLE;
+      a_o <= '0;
+      b_o <= '0;
+      v_o <= 1'b0;
     end else begin
-      current_state <= next_state;
+      a_o <= a_i;
+      b_o <= b_i;
+      v_o <= v_i;
     end
   end
 
-  always @(*) begin
-    case (current_state)
-      IDLE: begin
-        if (inputs_valid_i) next_state = LOAD_DATA;
-        else if (accumulator_valid_i) next_state = OUTPUT;
-        else next_state = IDLE;
-      end
-      LOAD_DATA: begin
-        next_state = FORWARD;
-      end
-      FORWARD: begin
-        next_state = MAC_COMPUTE;
-      end
-      MAC_COMPUTE: begin
-        if (mac_ready) next_state = OUTPUT;
-        else next_state = MAC_COMPUTE;
-      end
-      OUTPUT: begin
-        next_state = IDLE;
-      end
-      default: next_state = IDLE;
-    endcase
-  end
+  logic [DATA_WIDTH-1:0] prod, sum;
+  logic prod_v, sum_v;
 
-  // Track the transition from IDLE to OUTPUT due to accumulator_valid_i
-  always @(posedge clk_i or negedge rstn_i) begin
-    if (!rstn_i) begin
-      accumulator_drain_flag <= 1'b0;
-    end else begin
-      if (current_state == IDLE && accumulator_valid_i && next_state == OUTPUT) begin
-        accumulator_drain_flag <= 1'b1;
-      end else if (current_state == OUTPUT) begin
-        accumulator_drain_flag <= 1'b0;  // Clear after OUTPUT state
-      end
+  fp32Multiplier MUL (
+      .clk_i      (clk_i),
+      .rstn_i     (rstn_i),
+      .valid_i    (v_i),
+      .A          (a_i),
+      .B          (b_i),
+      .result_o   (prod),
+      .done_o     (prod_v),
+      .overflow_o (),
+      .underflow_o(),
+      .invalid_o  ()
+  );
+
+  typedef enum logic [1:0] {P_ACC, P_ISSUE, P_WAIT, P_DONE} pstate_t;
+  pstate_t st;
+
+  logic [DATA_WIDTH-1:0] acc[S];
+  logic [SW-1:0] slot;  // partial sum the next product joins
+  logic [CW-1:0] n_prod;  // products taken this matmul
+  logic [3:0] inflight;  // adds issued and not yet written back
+  logic [SW:0] width, m;  // combine: live partials, next pair to add
+
+  // One adder, shared by the accumulate and the final combine.
+  logic add_v;
+  logic [DATA_WIDTH-1:0] add_a, add_b;
+  logic [SW-1:0] add_tag, tag_dly[ADD_LAT];
+  always_comb begin
+    add_v = 1'b0;
+    add_a = acc[slot];
+    add_b = prod;
+    add_tag = slot;
+    if (st == P_ACC) add_v = prod_v;
+    else if (st == P_ISSUE && m < (width >> 1)) begin
+      add_v = 1'b1;
+      add_a = acc[SW'(2*m)];
+      add_b = acc[SW'(2*m+1)];
+      add_tag = SW'(m);
     end
   end
 
-  // Last element capture logic
-  always @(posedge clk_i or negedge rstn_i) begin
-    if (!rstn_i) begin
-      last_element_captured <= 1'b0;
-    end else begin
-      // Capture last_element_i pulse (independent of FSM state)
-      if (last_element_i) begin
-        last_element_captured <= 1'b1;
-      end
+  fp32Adder ADD (
+      .clk_i      (clk_i),
+      .rstn_i     (rstn_i),
+      .valid_i    (add_v),
+      .A          (add_a),
+      .B          (add_b),
+      .result_o   (sum),
+      .done_o     (sum_v),
+      .overflow_o (),
+      .underflow_o(),
+      .invalid_o  ()
+  );
 
-      // Clear the captured flag when last element pulse is generated
-      if (last_element_pulse) begin
-        last_element_captured <= 1'b0;  // Clear for next operation
-      end
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) for (int i = 0; i < ADD_LAT; i++) tag_dly[i] <= '0;
+    else begin
+      tag_dly[0] <= add_tag;
+      for (int i = 1; i < ADD_LAT; i++) tag_dly[i] <= tag_dly[i-1];
     end
   end
 
-  always @(posedge clk_i or negedge rstn_i) begin
+  always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
-      south_o <= {DATA_WIDTH{1'b0}};
-      east_o <= {DATA_WIDTH{1'b0}};
-
-      buffered_north <= {DATA_WIDTH{1'b0}};
-      buffered_west <= {DATA_WIDTH{1'b0}};
-
-      passthrough_valid_o <= 1'b0;
-      fwd_valid_o <= 1'b0;
-      accumulator_valid_o <= 1'b0;
-      mac_start <= 1'b0;
+      st       <= P_ACC;
+      slot     <= '0;
+      n_prod   <= '0;
+      inflight <= '0;
+      width    <= '0;
+      m        <= '0;
+      for (int i = 0; i < S; i++) acc[i] <= '0;
+    end else if (start_i) begin
+      st       <= P_ACC;
+      slot     <= '0;
+      n_prod   <= '0;
+      inflight <= '0;
+      m        <= '0;
+      for (int i = 0; i < S; i++) acc[i] <= '0;
     end else begin
-      case (current_state)
-        IDLE: begin
-          mac_start <= 1'b0;
-          passthrough_valid_o <= 1'b0;
-          fwd_valid_o <= 1'b0;
-
-          // Handle accumulator draining in IDLE state
-          if (select_accumulator_gated) begin
-            east_o <= buffered_accumulator;
-            accumulator_valid_o <= 1'b1;
-          end else begin
-            accumulator_valid_o <= 1'b0;
+      inflight <= inflight + {3'b0, add_v} - {3'b0, sum_v};
+      if (sum_v) acc[tag_dly[ADD_LAT-1]] <= sum;
+      case (st)
+        P_ACC: begin
+          if (prod_v) begin
+            slot   <= (slot == SW'(S - 1)) ? '0 : slot + 1'b1;
+            n_prod <= n_prod + 1'b1;
+          end
+          // Every product added and every add written back: the partials are final.
+          if (n_prod == CW'(K) && inflight == '0) begin
+            width <= (SW + 1)'(U);
+            m     <= '0;
+            st    <= (U == 1) ? P_DONE : P_ISSUE;
           end
         end
-
-        LOAD_DATA: begin
-          buffered_north <= north_i;
-          buffered_west <= west_i;
-
-          mac_start <= 1'b1;
-          passthrough_valid_o <= 1'b0;
-          fwd_valid_o <= 1'b0;
-          accumulator_valid_o <= 1'b0;
+        // One pairwise add per cycle into the low slots; an odd partial moves down unchanged.
+        P_ISSUE: begin
+          if (m + 1'b1 >= (width >> 1)) begin
+            if (width[0]) acc[SW'(width>>1)] <= acc[SW'(width-1)];
+            width <= (width + 1'b1) >> 1;
+            m     <= '0;
+            st    <= P_WAIT;
+          end else m <= m + 1'b1;
         end
-
-        // Hand the operands on now; the MAC keeps running behind them.
-        FORWARD: begin
-          south_o <= buffered_north;
-          east_o <= buffered_west;
-          fwd_valid_o <= 1'b1;
-
-          mac_start <= 1'b0;
-          passthrough_valid_o <= 1'b0;
-          accumulator_valid_o <= 1'b0;
-        end
-
-        MAC_COMPUTE: begin
-
-          mac_start <= 1'b0;
-          passthrough_valid_o <= 1'b0;
-          fwd_valid_o <= 1'b0;
-          accumulator_valid_o <= 1'b0;
-
-        end
-
-        OUTPUT: begin
-          south_o <= buffered_north;
-          fwd_valid_o <= 1'b0;
-
-          if (accumulator_drain_flag) begin
-            accumulator_valid_o <= 1'b1;
-            passthrough_valid_o <= 1'b0;
-            east_o <= west_i;
-          end else begin
-            passthrough_valid_o <= 1'b1;
-            accumulator_valid_o <= 1'b0;
-            east_o <= buffered_west;
-          end
-        end
-
-        default: begin
-          mac_start <= 1'b0;
-          fwd_valid_o <= 1'b0;
-        end
+        P_WAIT: if (inflight == '0 && !sum_v) st <= (width == 1) ? P_DONE : P_ISSUE;
+        P_DONE: ;
+        default: st <= P_ACC;
       endcase
     end
   end
 
-  // Results now land after the FSM has moved on, so these follow mac_done rather than a state.
-  always @(posedge clk_i or negedge rstn_i) begin
-    if (!rstn_i) begin
-      buffered_accumulator <= {DATA_WIDTH{1'b0}};
-      last_element_east_o  <= 1'b0;
-    end else begin
-      last_element_east_o <= last_element_pulse;
-      if (mac_done) buffered_accumulator <= mac_result;
-    end
-  end
+  assign result_o = acc[0];
+  assign done_o   = (st == P_DONE);
 
-  MAC #(
-      .DATA_WIDTH(DATA_WIDTH)
-  ) MAC_UNIT (
-      .clk_i(clk_i),
-      .rstn_i(rstn_i),
-      .data_i(west_i),
-      .weight_i(north_i),
-      .start_i(mac_start),
-      .clear_i(select_accumulator_gated),  // the drain has taken the value; reset for the next pass
-      .mac_done_o(mac_done),
-      .ready_o(mac_ready),
-      .busy_o(mac_busy),
-      .result_o(mac_result)
-  );
+`ifndef SYNTHESIS
+  a_no_late_product: assert property (@(posedge clk_i) disable iff (!rstn_i) prod_v |-> (st == P_ACC))
+    else $error("ProcessingElement: a product arrived after the partial sums were being combined");
+  a_slot_free: assert property (@(posedge clk_i) disable iff (!rstn_i) (st == P_ACC && prod_v) |-> (inflight < 4'(S)))
+    else $error("ProcessingElement: more adds in flight than partial sums");
+`endif
 
 endmodule

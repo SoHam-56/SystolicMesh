@@ -4,12 +4,9 @@ module SystolicMesh #(
     parameter MATRIX_SIZE = 32,
     parameter TILE_SIZE   = 4,
     parameter DATA_WIDTH  = 32,
-    parameter ROWS_MEM    = "rows.mem",
-    parameter COLS_MEM    = "cols.mem",
     parameter WIDE_READ   = 1,  // words per wide result read, one per consumer lane
     parameter HOST_WORDS  = 1,  // words per host write; must divide MATRIX_SIZE*MATRIX_SIZE
-    parameter SYNC_TILES  = 1,  // 1: SyncArray tiles, one product per PE per cycle; 0: the handshake SystolicArray
-    parameter COLLAPSE_K  = 0   // 1: one full-depth tile per output tile, no depth slices and no reduce; needs SYNC_TILES
+    parameter COLLAPSE_K  = 0   // 1: one full-depth tile per output tile, N^2 PEs and no reduce; 0: depth slices and the reduce tree
 ) (
     input logic clk_i,
     input logic rstn_i,
@@ -48,7 +45,6 @@ module SystolicMesh #(
   localparam NUM_TILES = TILES_PER_DIM * TILES_PER_DIM;
   localparam RP = COLLAPSE_K ? 1 : TILES_PER_DIM;  // partial tiles per output tile
   localparam LW = COLLAPSE_K ? MATRIX_SIZE : TILE_SIZE;  // words per broadcast write
-  initial if (COLLAPSE_K && !SYNC_TILES) $error("SystolicMesh: COLLAPSE_K needs SYNC_TILES");
 
   logic [DATA_WIDTH-1:0] mem_A[0:2*GLOBAL_ELEMENTS-1];
   logic [DATA_WIDTH-1:0] mem_B[0:2*GLOBAL_ELEMENTS-1];
@@ -342,41 +338,13 @@ module SystolicMesh #(
             assign tile_col_active[i][j][k] = 1'b0;
             assign t_data[i][j][k] = '0;
             assign t_valid[i][j][k] = 1'b0;
-          end else if (SYNC_TILES) begin : S
-            SyncArray #(
+          end else begin : S
+            SystolicArray #(
                 .N(TILE_SIZE),
                 .K(COLLAPSE_K ? MATRIX_SIZE : TILE_SIZE),
                 .DATA_WIDTH(DATA_WIDTH),
                 .WEST_WORDS(LW),
                 .NORTH_WORDS(LW)
-            ) tile (
-                .clk_i(clk_i),
-                .rstn_i(rstn_i),
-                .start_matrix_mult_i(tiles_global_start),
-                .rearm_i(rearm_q),
-                .west_write_enable_i(load_we_A[i][k]),
-                .west_write_data_i(load_data_A[i][k]),
-                .west_write_reset_i(ctrl_reset_all),
-                .north_write_enable_i(load_we_B[k][j]),
-                .north_write_data_i(load_data_B[k][j]),
-                .north_write_reset_i(ctrl_reset_all),
-                .collection_complete_o(tile_col_done[i][j][k]),
-                .collection_active_o(tile_col_active[i][j][k]),
-                .matrix_mult_complete_o(),
-                .north_queue_empty_o(),
-                .west_queue_empty_o(),
-                .read_enable_i(t_ren[i][j][k]),
-                .read_addr_i(t_addr[i][j][k]),
-                .read_data_o(t_data[i][j][k]),
-                .read_valid_o(t_valid[i][j][k])
-            );
-          end else begin : L
-            SystolicArray #(
-                .N(TILE_SIZE),
-                .DATA_WIDTH(DATA_WIDTH),
-                .WRITE_WORDS(TILE_SIZE),
-                .ROWS(ROWS_MEM),
-                .COLS(COLS_MEM)
             ) tile (
                 .clk_i(clk_i),
                 .rstn_i(rstn_i),
