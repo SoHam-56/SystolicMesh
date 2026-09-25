@@ -55,8 +55,8 @@ module SystolicMesh #(
   logic start_accept, bcast_release;
   assign input_ready_o = !in_full[in_wr];
   assign start_accept  = start_matrix_mult_i && input_ready_o;
-  logic ctrl_reset_all;  // mesh FSM re-arm, driven below
   logic [1:0] out_full;  // per result bank: holds a finished, unreleased result
+  logic loading_done;
   logic out_wr, out_rd;  // bank the reducers write, bank the consumer reads
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
@@ -91,122 +91,104 @@ module SystolicMesh #(
   assign west_queue_empty_o  = (ptr_A == 0);
   assign north_queue_empty_o = (ptr_B == 0);
 
-  typedef enum logic [2:0] {
-    IDLE,
-    RESET_SEQ,
-    BROADCAST,
-    FIRE_PULSE,
-    WAIT_TILES,
-    REDUCE_PULSE,
-    WAIT_REDUCE,
-    DONE
-  } state_t;
-  state_t current_state, next_state;
+  // ── Broadcast: copy a full staging bank into every array's free operand bank, one tile row per cycle ──
+  localparam int AK = COLLAPSE_K ? MATRIX_SIZE : TILE_SIZE;  // depth of each array's product
+  localparam int U = (AK < 6) ? AK : 6;  // partial sums per array pixel
+  localparam int RPU = RP * U;  // partials the reducer sums per pixel
 
-  logic loading_done;
-  logic all_tiles_collected;
-  logic all_reducers_done;
+  typedef enum logic [1:0] {
+    B_IDLE,
+    B_LOAD,
+    B_COMMIT
+  } bstate_t;
+  bstate_t bstate;
 
-  logic ctrl_load_en, ctrl_fire_pulse, ctrl_reduce_pulse, ctrl_done_signal;
-
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] tile_col_done;
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] tile_col_active;
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] reducer_done;
+  logic arrays_load_ready;  // every array has a free operand bank
+  logic arrays_final;  // every array holds a final unread set
+  logic arrays_busy;
+  logic reducers_ready, reducers_busy, reducers_read_done, reducers_written;
+  logic ctrl_load_en, commit_q, set_launch, reduce_start;
   integer load_idx;
 
-  assign loading_done = (load_idx >= TILE_SIZE - 1);  // one tile row per cycle
-  assign bcast_release = (current_state == BROADCAST) && loading_done;  // bank copied into the tiles
-  assign all_tiles_collected = &tile_col_done;
-  assign all_reducers_done = &reducer_done;
+  assign loading_done  = (load_idx >= TILE_SIZE - 1);  // one tile row per cycle
+  assign ctrl_load_en  = (bstate == B_LOAD);
+  assign bcast_release = (bstate == B_LOAD) && loading_done;  // staging bank copied into the arrays
+  assign set_launch    = (bstate == B_IDLE) && in_full[in_rd] && arrays_load_ready;
 
-  logic set_done;  // one cycle: this set's reduce has finished
-  assign set_done = (current_state == WAIT_REDUCE) && all_reducers_done;
-
-  always_comb begin
-    next_state = current_state;
-    ctrl_reset_all = 0;
-    ctrl_load_en = 0;
-    ctrl_fire_pulse = 0;
-    ctrl_reduce_pulse = 0;
-    ctrl_done_signal = 0;
-
-    case (current_state)
-      IDLE:        if (in_full[in_rd] && !out_full[out_wr]) next_state = RESET_SEQ;
-      RESET_SEQ: begin
-        ctrl_reset_all = 1;
-        next_state = BROADCAST;
-      end
-      BROADCAST: begin
-        ctrl_load_en = 1;
-        if (loading_done) next_state = FIRE_PULSE;
-      end
-      FIRE_PULSE: begin
-        ctrl_fire_pulse = 1;
-        next_state = WAIT_TILES;
-      end
-      WAIT_TILES:  if (all_tiles_collected) next_state = REDUCE_PULSE;
-      REDUCE_PULSE: begin
-        ctrl_reduce_pulse = 1;
-        next_state = WAIT_REDUCE;
-      end
-      WAIT_REDUCE: if (all_reducers_done) next_state = DONE;
-      DONE: begin
-        ctrl_done_signal = 1;
-        if (in_full[in_rd] && !out_full[out_wr]) next_state = RESET_SEQ;
-      end
-      default:     next_state = IDLE;
-    endcase
-  end
-
-  // Result banks: set by a finished reduce, cleared by the consumer's release.
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
-      out_full <= '0;
-      out_wr   <= 1'b0;
-      out_rd   <= 1'b0;
+      bstate   <= B_IDLE;
+      load_idx <= 0;
+      commit_q <= 1'b0;
     end else begin
-      if (set_done) begin
-        out_full[out_wr] <= 1'b1;
+      commit_q <= bcast_release;  // lands with the last registered row write
+      case (bstate)
+        B_IDLE:
+        if (set_launch) begin
+          bstate   <= B_LOAD;
+          load_idx <= 0;
+        end
+        B_LOAD: begin
+          if (loading_done) bstate <= B_COMMIT;
+          else load_idx <= load_idx + 1;
+        end
+        B_COMMIT: bstate <= B_IDLE;  // the arrays switch operand bank before the next launch looks
+        default: bstate <= B_IDLE;
+      endcase
+    end
+  end
+
+  // ── Result banks: FREE, WRITING from reduce start, FULL once written, FREE again on release ──
+  typedef enum logic [1:0] {
+    R_FREE,
+    R_WRITING,
+    R_FULL
+  } rstate_t;
+  rstate_t out_state[2];
+  logic set_done;  // one cycle: a set's last result was written
+  logic wr_bank_done;  // bank the next written set belongs to: sets finish in order
+  assign out_full[0]  = (out_state[0] == R_FULL);
+  assign out_full[1]  = (out_state[1] == R_FULL);
+  assign reduce_start = arrays_final && reducers_ready && (out_state[out_wr] == R_FREE);
+  assign set_done     = reducers_written;
+
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      out_state[0] <= R_FREE;
+      out_state[1] <= R_FREE;
+      out_wr <= 1'b0;
+      out_rd <= 1'b0;
+      wr_bank_done <= 1'b0;
+      matrix_mult_complete_o <= 1'b0;
+    end else begin
+      matrix_mult_complete_o <= set_done;
+      if (reduce_start) begin
+        out_state[out_wr] <= R_WRITING;
         out_wr <= ~out_wr;
       end
+      if (set_done) begin
+        out_state[wr_bank_done] <= R_FULL;
+        wr_bank_done <= ~wr_bank_done;
+      end
       if (result_release_i && out_full[out_rd]) begin
-        out_full[out_rd] <= 1'b0;
+        out_state[out_rd] <= R_FREE;
         out_rd <= ~out_rd;
       end
     end
   end
 
-  // Registered re-arm. Driving rearm_i straight from ctrl_reset_all closes a
-  // combinational loop: collection_complete_o -> all_tiles_collected -> the FSM
-  // that produces ctrl_reset_all. RESET_SEQ is followed by BROADCAST, so a
-  // one-cycle-late clear still lands long before WAIT_TILES samples the flag.
-  logic rearm_q;
-  always_ff @(posedge clk_i or negedge rstn_i) begin
-    if (!rstn_i) rearm_q <= 1'b0;
-    else rearm_q <= ctrl_reset_all;
-  end
+  logic mesh_busy;  // a set is somewhere between staging and a written result; for testbenches
+  assign mesh_busy = (bstate != B_IDLE) || arrays_busy || reducers_busy;
 
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] load_we_A, load_we_B;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][LW-1:0][DATA_WIDTH-1:0] load_data_A, load_data_B;
-  logic tiles_global_start;
   integer i_L, j_L, k_L, sub_r, sub_c, addr_calc, w_L, rr_L;
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
-      current_state <= IDLE;
-      load_idx <= 0;
       load_we_A <= '{default: 0};
       load_we_B <= '{default: 0};
-      tiles_global_start <= 0;
-      matrix_mult_complete_o <= 0;
     end else begin
-      current_state <= next_state;
-      matrix_mult_complete_o <= ctrl_done_signal;
-      tiles_global_start <= ctrl_fire_pulse;
-
-      if (ctrl_reset_all) load_idx <= 0;
-      else if (ctrl_load_en && !loading_done) load_idx <= load_idx + 1;
-
       load_we_A <= '{default: 0};
       load_we_B <= '{default: 0};
       if (ctrl_load_en) begin
@@ -229,24 +211,24 @@ module SystolicMesh #(
             load_we_B[0][j_L] <= 1;
           end
         end else begin
-        for (i_L = 0; i_L < TILES_PER_DIM; i_L++) begin
+          for (i_L = 0; i_L < TILES_PER_DIM; i_L++) begin
+            for (k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
+              for (sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
+                addr_calc = ((i_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((k_L * TILE_SIZE) + sub_c);
+                load_data_A[i_L][k_L][sub_c] <= mem_A[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
+              end
+              load_we_A[i_L][k_L] <= 1;
+            end
+          end
           for (k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
-            for (sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
-              addr_calc = ((i_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((k_L * TILE_SIZE) + sub_c);
-              load_data_A[i_L][k_L][sub_c] <= mem_A[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
+            for (j_L = 0; j_L < TILES_PER_DIM; j_L++) begin
+              for (sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
+                addr_calc = ((k_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((j_L * TILE_SIZE) + sub_c);
+                load_data_B[k_L][j_L][sub_c] <= mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
+              end
+              load_we_B[k_L][j_L] <= 1;
             end
-            load_we_A[i_L][k_L] <= 1;
           end
-        end
-        for (k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
-          for (j_L = 0; j_L < TILES_PER_DIM; j_L++) begin
-            for (sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
-              addr_calc = ((k_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((j_L * TILE_SIZE) + sub_c);
-              load_data_B[k_L][j_L][sub_c] <= mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
-            end
-            load_we_B[k_L][j_L] <= 1;
-          end
-        end
         end
       end
     end
@@ -258,8 +240,7 @@ module SystolicMesh #(
   logic [NUM_TILES-1:0][          31:0] sram_addr_bank;
 
   always_comb
-    for (int p = 0; p < NUM_TILES; p++)
-      sram_addr_bank[p] = sram_addr_agg[p] + (out_wr ? GLOBAL_ELEMENTS : 0);
+    for (int p = 0; p < NUM_TILES; p++) sram_addr_bank[p] = sram_addr_agg[p];  // each reducer adds its own bank offset
 
   localparam int WIDE_STRIDE = GLOBAL_ELEMENTS / WIDE_READ;
   logic [WIDE_READ-1:0][31:0] wide_addr;
@@ -293,12 +274,37 @@ module SystolicMesh #(
   );
 
   assign collection_complete_o = out_full[out_rd];  // cleared by release, never sticky
-  assign collection_active_o   = (current_state == WAIT_REDUCE);
+  assign collection_active_o   = reducers_busy;
 
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0]                 t_ren;
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][          31:0] t_addr;
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][DATA_WIDTH-1:0] t_data;
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0]                 t_valid;
+  // Per output tile: U partials from each depth slice, flattened for its reducer.
+  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][RPU-1:0][DATA_WIDTH-1:0] t_data;
+  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] t_ren;
+  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][$clog2(TILE_ELEMENTS)-1:0] t_addr;
+  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] r_ready, r_busy, r_read_done, r_written;
+  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] a_ready, a_final, a_busy;
+
+  // Every array and reducer runs in lockstep; the mesh acts on the AND (or OR) of them all.
+  always_comb begin
+    arrays_load_ready = 1'b1;
+    arrays_final = 1'b1;
+    arrays_busy = 1'b0;
+    reducers_ready = 1'b1;
+    reducers_busy = 1'b0;
+    reducers_read_done = 1'b1;
+    reducers_written = 1'b1;
+    for (int a = 0; a < TILES_PER_DIM; a++)
+      for (int b = 0; b < TILES_PER_DIM; b++) begin
+        reducers_ready &= r_ready[a][b];
+        reducers_busy |= r_busy[a][b];
+        reducers_read_done &= r_read_done[a][b];
+        reducers_written &= r_written[a][b];
+        for (int c = 0; c < TILES_PER_DIM; c++) begin
+          arrays_load_ready &= a_ready[a][b][c];
+          arrays_final &= a_final[a][b][c];
+          arrays_busy |= a_busy[a][b][c];
+        end
+      end
+  end
 
   genvar i, j, k;
   generate
@@ -308,64 +314,64 @@ module SystolicMesh #(
         localparam TILE_IDX = i * TILES_PER_DIM + j;
 
         AccumulationUnit #(
-            .P(RP),
+            .P(RPU),
             .N(TILE_SIZE),
             .DATA_WIDTH(DATA_WIDTH),
             .MATRIX_WIDTH(MATRIX_SIZE),
             .TILE_ROW_OFFSET(i * TILE_SIZE),
             .TILE_COL_OFFSET(j * TILE_SIZE)
         ) acc_unit (
-            .clk_i(clk_i),
-            .rstn_i(rstn_i),
-            .start_i(ctrl_reduce_pulse),
-            .rearm_i(rearm_q),
-            .tile_data_i(t_data[i][j][RP-1:0]),
-            .tile_valid_i(t_valid[i][j][RP-1:0]),
-            .tile_ren_o(t_ren[i][j][RP-1:0]),
-            .tile_addr_o(t_addr[i][j][RP-1:0]),
-
+            .clk_i       (clk_i),
+            .rstn_i      (rstn_i),
+            .start_i     (reduce_start),
+            .out_bank_i  (out_wr),
+            .tile_data_i (t_data[i][j]),
+            .rd_en_o     (t_ren[i][j]),
+            .rd_addr_o   (t_addr[i][j]),
+            .read_done_o (r_read_done[i][j]),
+            .ready_o     (r_ready[i][j]),
             .write_en_o  (sram_we_agg[TILE_IDX]),
             .write_addr_o(sram_addr_agg[TILE_IDX]),
             .write_data_o(sram_data_agg[TILE_IDX]),
-
-            .done_o(reducer_done[i][j])
+            .written_o   (r_written[i][j]),
+            .busy_o      (r_busy[i][j])
         );
 
         for (k = 0; k < TILES_PER_DIM; k++) begin : DEPTH
           if (COLLAPSE_K && k > 0) begin : UNUSED
-            // Collapsed: only depth slot 0 exists; the rest read as finished and empty.
-            assign tile_col_done[i][j][k] = 1'b1;
-            assign tile_col_active[i][j][k] = 1'b0;
-            assign t_data[i][j][k] = '0;
-            assign t_valid[i][j][k] = 1'b0;
+            // Collapsed: only depth slot 0 exists; the rest read as ready, final and idle.
+            assign a_ready[i][j][k] = 1'b1;
+            assign a_final[i][j][k] = 1'b1;
+            assign a_busy[i][j][k]  = 1'b0;
           end else begin : S
+            logic [U-1:0][DATA_WIDTH-1:0] rd;
             SystolicArray #(
                 .N(TILE_SIZE),
-                .K(COLLAPSE_K ? MATRIX_SIZE : TILE_SIZE),
+                .K(AK),
                 .DATA_WIDTH(DATA_WIDTH),
                 .WEST_WORDS(LW),
-                .NORTH_WORDS(LW)
+                .NORTH_WORDS(LW),
+                .U(U)
             ) tile (
                 .clk_i(clk_i),
                 .rstn_i(rstn_i),
-                .start_matrix_mult_i(tiles_global_start),
-                .rearm_i(rearm_q),
                 .west_write_enable_i(load_we_A[i][k]),
                 .west_write_data_i(load_data_A[i][k]),
-                .west_write_reset_i(ctrl_reset_all),
                 .north_write_enable_i(load_we_B[k][j]),
                 .north_write_data_i(load_data_B[k][j]),
-                .north_write_reset_i(ctrl_reset_all),
-                .collection_complete_o(tile_col_done[i][j][k]),
-                .collection_active_o(tile_col_active[i][j][k]),
-                .matrix_mult_complete_o(),
-                .north_queue_empty_o(),
-                .west_queue_empty_o(),
-                .read_enable_i(t_ren[i][j][k]),
-                .read_addr_i(t_addr[i][j][k]),
-                .read_data_o(t_data[i][j][k]),
-                .read_valid_o(t_valid[i][j][k])
+                .commit_i(commit_q),
+                .load_ready_o(a_ready[i][j][k]),
+                .set_final_o(a_final[i][j][k]),
+                .read_enable_i(t_ren[i][j]),
+                .read_addr_i(t_addr[i][j]),
+                .read_data_o(rd),
+                .read_valid_o(),
+                .release_i(r_read_done[i][j]),
+                .busy_o(a_busy[i][j][k])
             );
+            for (genvar u = 0; u < U; u++) begin : PART
+              assign t_data[i][j][k*U+u] = rd[u];
+            end
           end
         end
       end
@@ -374,13 +380,14 @@ module SystolicMesh #(
 
 `ifndef SYNTHESIS
   // Handshake invariants; live only with --assert.
-  a_result_bank_free: assert property (@(posedge clk_i) disable iff (!rstn_i) set_done |-> !out_full[out_wr])
-    else $error("SystolicMesh: a reduce finished into a full result bank");
+  a_result_bank_free: assert property (@(posedge clk_i) disable iff (!rstn_i) reduce_start |-> out_state[out_wr] == R_FREE)
+    else $error("SystolicMesh: a reduce started into a result bank that is not free");
+  a_written_in_order: assert property (@(posedge clk_i) disable iff (!rstn_i) set_done |-> out_state[wr_bank_done] == R_WRITING)
+    else $error("SystolicMesh: a set finished writing into a bank that was not being written");
   a_staging_bank_full: assert property (@(posedge clk_i) disable iff (!rstn_i) bcast_release |-> in_full[in_rd])
     else $error("SystolicMesh: BROADCAST copied an empty staging bank");
-  a_launch_ready: assert property (@(posedge clk_i) disable iff (!rstn_i)
-                                   ctrl_reset_all |-> (in_full[in_rd] && !out_full[out_wr]))
-    else $error("SystolicMesh: launched without a full staging bank and a free result bank");
+  a_arrays_ready_on_launch: assert property (@(posedge clk_i) disable iff (!rstn_i) (load_we_A != '0) |-> arrays_load_ready)
+    else $error("SystolicMesh: broadcast wrote an array whose operand bank was not free");
   a_read_outstanding: assert property (@(posedge clk_i) disable iff (!rstn_i) read_enable_i |-> out_full[out_rd])
     else $error("SystolicMesh: result read with no result outstanding");
   a_wide_read_outstanding: assert property (@(posedge clk_i) disable iff (!rstn_i) wide_read_enable_i |-> out_full[out_rd])

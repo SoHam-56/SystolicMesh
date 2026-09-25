@@ -1,8 +1,8 @@
 `timescale 1ns / 100ps
 
-// Reduces the P partial tiles into one output tile, then writes it to the mesh SRAM.
-// Every cycle it reads the same pixel from all P partial tiles and sums them in a log2(P) adder tree.
-// Results leave the tree in pixel order, one per cycle, and are written as they emerge.
+// Reduces the P partial sums of every pixel of one output tile and writes the tile to the mesh SRAM.
+// Every cycle it reads one pixel's P partials (U per array, from every depth slice) and sums them in a log2(P) adder tree.
+// A new set may start as soon as the last pixel of the previous one has been read; each write carries its own result bank.
 module AccumulationUnit #(
     parameter P = 8,
     parameter N = 4,
@@ -12,65 +12,83 @@ module AccumulationUnit #(
     parameter TILE_COL_OFFSET = 0
 ) (
     input logic clk_i,
-    rstn_i,
-    start_i,
-    rearm_i,
-
-    input  logic [P-1:0][DATA_WIDTH-1:0] tile_data_i,
-    input  logic [P-1:0]                 tile_valid_i,
-    output logic [P-1:0]                 tile_ren_o,
-    output logic [P-1:0][          31:0] tile_addr_o,
-
-    output logic                  write_en_o,
-    output logic [          31:0] write_addr_o,
+    input logic rstn_i,
+    input logic start_i,  // read the arrays' oldest final set now
+    input logic out_bank_i,  // result bank this set is written to
+    input logic [P-1:0][DATA_WIDTH-1:0] tile_data_i,
+    output logic rd_en_o,
+    output logic [$clog2(N*N)-1:0] rd_addr_o,
+    output logic read_done_o,  // one cycle: the last pixel was read, the arrays may release the set
+    output logic ready_o,  // not reading; a start is taken
+    output logic write_en_o,
+    output logic [31:0] write_addr_o,  // includes the result bank offset
     output logic [DATA_WIDTH-1:0] write_data_o,
-
-    output logic done_o
+    output logic written_o,  // one cycle: the last pixel of a set was written
+    output logic busy_o  // reading, or pixels still in the tree
 );
   localparam int PIXELS = N * N;
-  localparam int CW = $clog2(PIXELS + 1);
+  localparam int PW = (PIXELS > 1) ? $clog2(PIXELS) : 1;
   localparam int ADD_LAT = 5;  // fp32Adder: valid_i at t, done_o at t+5
-  localparam int LEVELS = $clog2(P);  // adder levels; 0 when there is one partial tile
+  localparam int LEVELS = $clog2(P);  // adder levels; 0 when there is one partial
+  localparam int LAT = 1 + LEVELS * ADD_LAT;  // read issue to tree output
+  localparam int BANK_OFFSET = MATRIX_WIDTH * MATRIX_WIDTH;
 
-  // Entries at tree level l: level 0 holds the P partial pixels.
+  // Entries at tree level l: level 0 holds the P partials.
   function automatic int width_at(input int l);
     return (P + (1 << l) - 1) >> l;
   endfunction
 
-  typedef enum logic [1:0] {
-    RIDLE,
-    RREAD,
-    RWAIT,
-    RDONE
-  } rstate_t;
-  rstate_t r_curr;
+  logic reading;
+  logic [PW-1:0] rd_idx;
+  logic rd_bank;
 
-  logic [CW-1:0] rd_idx;  // pixel being read from all P partial tiles
-  logic [CW-1:0] w_idx;  // pixels written so far
+  assign ready_o   = !reading;
+  assign rd_en_o   = reading;
+  assign rd_addr_o = rd_idx;
+  assign read_done_o = reading && (rd_idx == PW'(PIXELS - 1));
 
-  logic read_issue;
-  assign read_issue = (r_curr == RREAD);
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      reading <= 1'b0;
+      rd_idx  <= '0;
+      rd_bank <= 1'b0;
+    end else if (start_i && !reading) begin
+      reading <= 1'b1;
+      rd_idx  <= '0;
+      rd_bank <= out_bank_i;
+    end else if (reading) begin
+      if (rd_idx == PW'(PIXELS - 1)) reading <= 1'b0;
+      else rd_idx <= rd_idx + 1'b1;
+    end
+  end
 
-  always_comb begin
-    tile_ren_o  = '0;
-    tile_addr_o = '{default: 0};
-    if (read_issue)
-      for (int k = 0; k < P; k++) begin
-        tile_ren_o[k]  = 1'b1;
-        tile_addr_o[k] = 32'(rd_idx);
+  // Pixel index and result bank travel beside the data, LAT cycles from read to write.
+  logic          tag_v   [LAT];
+  logic [PW-1:0] tag_idx [LAT];
+  logic          tag_bank[LAT];
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      for (int s = 0; s < LAT; s++) begin
+        tag_v[s]    <= 1'b0;
+        tag_idx[s]  <= '0;
+        tag_bank[s] <= 1'b0;
       end
+    end else begin
+      tag_v[0]    <= reading;
+      tag_idx[0]  <= rd_idx;
+      tag_bank[0] <= rd_bank;
+      for (int s = 1; s < LAT; s++) begin
+        tag_v[s]    <= tag_v[s-1];
+        tag_idx[s]  <= tag_idx[s-1];
+        tag_bank[s] <= tag_bank[s-1];
+      end
+    end
   end
 
   // A read issued at cycle t presents its data at t+1, so level 0 is valid one cycle behind.
-  logic lvl0_v;
-  always_ff @(posedge clk_i or negedge rstn_i) begin
-    if (!rstn_i) lvl0_v <= 1'b0;
-    else lvl0_v <= read_issue;
-  end
-
   logic [DATA_WIDTH-1:0] lvl_d[LEVELS+1][P];
   logic                  lvl_v[LEVELS+1];
-  assign lvl_v[0] = lvl0_v;
+  assign lvl_v[0] = tag_v[0];
   for (genvar k = 0; k < P; k++) begin : L0
     assign lvl_d[0][k] = tile_data_i[k];
   end
@@ -122,41 +140,27 @@ module AccumulationUnit #(
     assign lvl_v[l+1] = done_bits[0];
   end
 
-  logic [31:0] local_row, local_col;
-  always_comb begin
-    local_row = 32'(w_idx) / N;
-    local_col = 32'(w_idx) % N;
-  end
+  logic [PW-1:0] w_idx;
+  logic w_bank;
+  assign w_idx  = tag_idx[LAT-1];
+  assign w_bank = tag_bank[LAT-1];
 
   assign write_en_o   = lvl_v[LEVELS];
   assign write_data_o = lvl_d[LEVELS][0];
-  assign write_addr_o = ((TILE_ROW_OFFSET + local_row) * MATRIX_WIDTH) + (TILE_COL_OFFSET + local_col);
-  assign done_o       = (r_curr == RDONE);
+  assign write_addr_o = (w_bank ? BANK_OFFSET : 0) +
+                        ((TILE_ROW_OFFSET + int'(w_idx) / N) * MATRIX_WIDTH) + (TILE_COL_OFFSET + int'(w_idx) % N);
+  assign written_o    = write_en_o && (w_idx == PW'(PIXELS - 1));
 
-  always_ff @(posedge clk_i or negedge rstn_i) begin
-    if (!rstn_i) begin
-      r_curr <= RIDLE;
-      rd_idx <= '0;
-      w_idx  <= '0;
-    end else begin
-      if (write_en_o) w_idx <= w_idx + 1'b1;
-      case (r_curr)
-        RIDLE: begin
-          if (start_i) begin
-            rd_idx <= '0;
-            w_idx  <= '0;
-            r_curr <= RREAD;
-          end
-        end
-        RREAD: begin
-          if (rd_idx == CW'(PIXELS - 1)) r_curr <= RWAIT;
-          else rd_idx <= rd_idx + 1'b1;
-        end
-        RWAIT: if (write_en_o && (w_idx == CW'(PIXELS - 1))) r_curr <= RDONE;
-        RDONE: if (rearm_i) r_curr <= RIDLE;
-        default: r_curr <= RIDLE;
-      endcase
-    end
+  logic in_tree;
+  always_comb begin
+    in_tree = 1'b0;
+    for (int s = 0; s < LAT; s++) in_tree |= tag_v[s];
   end
+  assign busy_o = reading || in_tree;
+
+`ifndef SYNTHESIS
+  a_tag_aligned: assert property (@(posedge clk_i) disable iff (!rstn_i) lvl_v[LEVELS] == tag_v[LAT-1])
+    else $error("AccumulationUnit: tree output and its pixel tag are out of step");
+`endif
 
 endmodule
