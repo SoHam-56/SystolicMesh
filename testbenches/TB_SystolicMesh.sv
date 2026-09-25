@@ -435,13 +435,13 @@ module TB_SystolicMesh;
   // Sampled on the falling edge from registered state only, never a combinational view of start.
   int  in_overlap = 0, out_overlap = 0, n_launched = 0, n_completed = 0;
   bit  streaming = 0, count_bad = 0;
-  wire mesh_busy = (int'(dut.current_state) != 0) && (int'(dut.current_state) != 7);  // not IDLE, not DONE
+  wire mesh_busy = dut.mesh_busy;  // a set between staging and a written result
   initial forever begin
     @(negedge clk);
     if (streaming) begin
       if ((w_we || n_we) && mesh_busy) in_overlap++;
       if (r_en && mesh_busy) out_overlap++;
-      if (int'(dut.current_state) == 1) n_launched++;  // RESET_SEQ lasts one cycle per set
+      if (dut.set_launch) n_launched++;  // one cycle per set, as the broadcast starts
       if (dut.set_done) n_completed++;
       if (n_completed > n_launched) count_bad = 1;
     end
@@ -515,17 +515,20 @@ module TB_SystolicMesh;
 
   // ── Staging overrun: writes and a start while input_ready_o is low ─────────
   // The consumer withholds release until both result banks and both staging banks are full.
+  // Sets the mesh holds with no release: 2 staging banks, 2 operand and 3 partial-sum banks in every array, 3 result banks.
+  localparam int MESH_SETS = 10;
+
   task automatic staging_overrun_test();
     string f_a, f_b, f_c;
     int errs;
-    $display("\n[STAGE] STAGING OVERRUN: queue four sets unreleased, then write and start while not ready");
+    $display("\n[STAGE] STAGING OVERRUN: queue %0d sets unreleased, then write and start while not ready", MESH_SETS);
     n_launched  = 0;
     n_completed = 0;
     count_bad   = 0;
     streaming   = 1;
     fork
       begin
-        for (int j = 0; j < 4; j++) begin
+        for (int j = 0; j < MESH_SETS; j++) begin
           set_files(j % NUM_TEST_SETS, f_a, f_b, f_c);
           while (!in_ready) @(posedge clk);
           fork
@@ -537,9 +540,9 @@ module TB_SystolicMesh;
           start_mult = 0;
           @(posedge clk);
         end
-        for (int w = 0; w < TIMEOUT_CYCLES && in_ready; w++) @(posedge clk);  // two results fill both banks, two sets stay staged
-        if (in_ready) $display("  [FAIL] Overrun not reached: input_ready_o high with both banks full");
-        set_files(4 % NUM_TEST_SETS, f_a, f_b, f_c);
+        for (int w = 0; w < TIMEOUT_CYCLES && in_ready; w++) @(posedge clk);  // every bank from staging to result is full
+        if (in_ready) $display("  [FAIL] Overrun not reached: input_ready_o high with the mesh full");
+        set_files(MESH_SETS % NUM_TEST_SETS, f_a, f_b, f_c);
         fork
           load_west_queue(f_a);
           load_north_queue(f_b);
@@ -552,7 +555,7 @@ module TB_SystolicMesh;
           $display("  [FAIL] Writes or a start were taken while input_ready_o was low: ptr_A=%0d ptr_B=%0d",
                    dut.ptr_A, dut.ptr_B);
         else $display("  [Overrun] 256 writes and a start while not ready were all ignored");
-        for (int j = 0; j < 4; j++) begin
+        for (int j = 0; j < MESH_SETS; j++) begin
           set_files(j % NUM_TEST_SETS, f_a, f_b, f_c);
           while (!coll_complete) @(posedge clk);
           verify_results(f_c, errs);
@@ -564,7 +567,7 @@ module TB_SystolicMesh;
           rel = 0;
           @(posedge clk);
         end
-        set_files(4 % NUM_TEST_SETS, f_a, f_b, f_c);  // a proper load after the overrun must land intact
+        set_files(MESH_SETS % NUM_TEST_SETS, f_a, f_b, f_c);  // a proper load after the overrun must land intact
         while (!in_ready) @(posedge clk);
         fork
           load_west_queue(f_a);
@@ -592,9 +595,9 @@ module TB_SystolicMesh;
     join_any
     disable fork;
     streaming = 0;
-    if (count_bad || n_launched != 5 || n_completed != 5)
-      $display("  [FAIL] Overrun: %0d sets launched and %0d completed, expected 5 each", n_launched,
-               n_completed);
+    if (count_bad || n_launched != MESH_SETS + 1 || n_completed != MESH_SETS + 1)
+      $display("  [FAIL] Overrun: %0d sets launched and %0d completed, expected %0d each", n_launched,
+               n_completed, MESH_SETS + 1);
   endtask
 
   // ── Top-level stimulus ────────────────────────────────────────────────────
