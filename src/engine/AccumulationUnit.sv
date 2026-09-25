@@ -18,6 +18,8 @@ module AccumulationUnit #(
     input logic start_i,  // read the arrays' oldest final set now
     input logic [RBW-1:0] out_bank_i,  // result bank this set is written to
     input logic [P-1:0][DATA_WIDTH-1:0] tile_data_i,
+    input logic [N-1:0][DATA_WIDTH-1:0] bias_i,  // at start: the set's bias for this tile's N columns, zero for none
+    output logic [DATA_WIDTH-1:0] bias_word_o,  // bias of the pixel read last cycle, one of the P inputs
     output logic rd_en_o,
     output logic [$clog2(N*N)-1:0] rd_addr_o,
     output logic read_done_o,  // one cycle: the last pixel was read, the arrays may release the set
@@ -43,6 +45,7 @@ module AccumulationUnit #(
   logic reading;
   logic [PW-1:0] rd_idx;
   logic [RBW-1:0] rd_bank;
+  logic [N-1:0][DATA_WIDTH-1:0] rd_bias;
 
   assign ready_o   = !reading;
   assign rd_en_o   = reading;
@@ -58,10 +61,17 @@ module AccumulationUnit #(
       reading <= 1'b1;
       rd_idx  <= '0;
       rd_bank <= out_bank_i;
+      rd_bias <= bias_i;
     end else if (reading) begin
       if (rd_idx == PW'(PIXELS - 1)) reading <= 1'b0;
       else rd_idx <= rd_idx + 1'b1;
     end
+  end
+
+  // The bias word joins the tree with the pixel's partials, which arrive one cycle after the read.
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) bias_word_o <= '0;
+    else bias_word_o <= rd_bias[int'(rd_idx) % N];
   end
 
   // Pixel index and result bank travel beside the data, LAT cycles from read to write.

@@ -12,6 +12,8 @@ module SystolicMesh #(
     input logic clk_i,
     input logic rstn_i,
     input logic start_matrix_mult_i,
+    input logic                                  bias_valid_i,  // with the start: add bias_i[c] to every element of column c
+    input logic [MATRIX_SIZE-1:0][DATA_WIDTH-1:0] bias_i,
 
     input logic                  north_write_enable_i,
     input logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] north_write_data_i,
@@ -97,6 +99,7 @@ module SystolicMesh #(
   localparam int AK = COLLAPSE_K ? MATRIX_SIZE : TILE_SIZE;  // depth of each array's product
   localparam int U = (AK < 6) ? AK : 6;  // partial sums per array pixel
   localparam int RPU = RP * U;  // partials the reducer sums per pixel
+  localparam int BIAS_Q = 8;  // sets between their start and their reduce: 2 staging, 2 operand, 3 partial-sum banks
 
   typedef enum logic [1:0] {
     B_IDLE,
@@ -179,6 +182,33 @@ module SystolicMesh #(
         out_state[out_rd] <= R_FREE;
         out_rd <= next_bank(out_rd);
       end
+    end
+  end
+
+  // ── Bias queue: sets reach the reducers in the order they were started ──
+  logic [DATA_WIDTH-1:0] bias_q[BIAS_Q][MATRIX_SIZE];
+  logic [BIAS_Q-1:0] bias_qv;
+  logic [$clog2(BIAS_Q)-1:0] bq_wr, bq_rd;
+  logic [$clog2(BIAS_Q):0] bq_n;
+  logic [MATRIX_SIZE-1:0][DATA_WIDTH-1:0] red_bias;  // bias of the set the reducers are starting
+  always_comb begin
+    for (int c = 0; c < MATRIX_SIZE; c++) red_bias[c] = bias_qv[bq_rd] ? bias_q[bq_rd][c] : '0;
+  end
+
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      bq_wr   <= '0;
+      bq_rd   <= '0;
+      bq_n    <= '0;
+      bias_qv <= '0;
+    end else begin
+      if (start_accept) begin
+        for (int c = 0; c < MATRIX_SIZE; c++) bias_q[bq_wr][c] <= bias_i[c];
+        bias_qv[bq_wr] <= bias_valid_i;
+        bq_wr <= bq_wr + 1'b1;
+      end
+      if (reduce_start) bq_rd <= bq_rd + 1'b1;
+      bq_n <= bq_n + (start_accept ? 1'b1 : 1'b0) - (reduce_start ? 1'b1 : 1'b0);
     end
   end
 
@@ -284,6 +314,7 @@ module SystolicMesh #(
   // Per output tile: U partials from each depth slice, flattened for its reducer.
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][RPU-1:0][DATA_WIDTH-1:0] t_data;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] t_ren;
+  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][DATA_WIDTH-1:0] t_bias;  // the bias of the pixel being summed
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][$clog2(TILE_ELEMENTS)-1:0] t_addr;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] r_ready, r_busy, r_read_done, r_written;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] a_ready, a_final, a_busy;
@@ -319,7 +350,7 @@ module SystolicMesh #(
         localparam TILE_IDX = i * TILES_PER_DIM + j;
 
         AccumulationUnit #(
-            .P(RPU),
+            .P(RPU + 1),  // the partials and the bias
             .RESULT_BANKS(RESULT_BANKS),
             .N(TILE_SIZE),
             .DATA_WIDTH(DATA_WIDTH),
@@ -331,7 +362,8 @@ module SystolicMesh #(
             .rstn_i      (rstn_i),
             .start_i     (reduce_start),
             .out_bank_i  (out_wr),
-            .tile_data_i (t_data[i][j]),
+            .tile_data_i ({t_bias[i][j], t_data[i][j]}),
+            .bias_i      (red_bias[j*TILE_SIZE+:TILE_SIZE]),
             .rd_en_o     (t_ren[i][j]),
             .rd_addr_o   (t_addr[i][j]),
             .read_done_o (r_read_done[i][j]),
@@ -340,6 +372,7 @@ module SystolicMesh #(
             .write_addr_o(sram_addr_agg[TILE_IDX]),
             .write_data_o(sram_data_agg[TILE_IDX]),
             .written_o   (r_written[i][j]),
+            .bias_word_o (t_bias[i][j]),
             .busy_o      (r_busy[i][j])
         );
 
@@ -390,6 +423,10 @@ module SystolicMesh #(
     else $error("SystolicMesh: a reduce started into a result bank that is not free");
   a_written_in_order: assert property (@(posedge clk_i) disable iff (!rstn_i) set_done |-> out_state[wr_bank_done] == R_WRITING)
     else $error("SystolicMesh: a set finished writing into a bank that was not being written");
+  a_bias_queue_room: assert property (@(posedge clk_i) disable iff (!rstn_i) start_accept |-> bq_n < BIAS_Q)
+    else $error("SystolicMesh: bias queue overflow");
+  a_bias_queue_held: assert property (@(posedge clk_i) disable iff (!rstn_i) reduce_start |-> bq_n != 0)
+    else $error("SystolicMesh: a reduce started with no bias queued");
   a_staging_bank_full: assert property (@(posedge clk_i) disable iff (!rstn_i) bcast_release |-> in_full[in_rd])
     else $error("SystolicMesh: BROADCAST copied an empty staging bank");
   a_arrays_ready_on_launch: assert property (@(posedge clk_i) disable iff (!rstn_i) (load_we_A != '0) |-> arrays_load_ready)

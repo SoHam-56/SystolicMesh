@@ -87,6 +87,8 @@ module TB_SystolicMesh;
       .clk_i(clk),
       .rstn_i(rstn),
       .start_matrix_mult_i(start_mult),
+      .bias_valid_i(1'b0),
+      .bias_i('0),
 
       .north_write_enable_i(n_we),
       .north_write_data_i  (n_data),
