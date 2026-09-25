@@ -9,12 +9,14 @@ module AccumulationUnit #(
     parameter DATA_WIDTH = 32,
     parameter MATRIX_WIDTH = 32,
     parameter TILE_ROW_OFFSET = 0,
-    parameter TILE_COL_OFFSET = 0
+    parameter TILE_COL_OFFSET = 0,
+    parameter RESULT_BANKS = 2,
+    parameter RBW = (RESULT_BANKS > 1) ? $clog2(RESULT_BANKS) : 1
 ) (
     input logic clk_i,
     input logic rstn_i,
     input logic start_i,  // read the arrays' oldest final set now
-    input logic out_bank_i,  // result bank this set is written to
+    input logic [RBW-1:0] out_bank_i,  // result bank this set is written to
     input logic [P-1:0][DATA_WIDTH-1:0] tile_data_i,
     output logic rd_en_o,
     output logic [$clog2(N*N)-1:0] rd_addr_o,
@@ -40,7 +42,7 @@ module AccumulationUnit #(
 
   logic reading;
   logic [PW-1:0] rd_idx;
-  logic rd_bank;
+  logic [RBW-1:0] rd_bank;
 
   assign ready_o   = !reading;
   assign rd_en_o   = reading;
@@ -51,7 +53,7 @@ module AccumulationUnit #(
     if (!rstn_i) begin
       reading <= 1'b0;
       rd_idx  <= '0;
-      rd_bank <= 1'b0;
+      rd_bank <= '0;
     end else if (start_i && !reading) begin
       reading <= 1'b1;
       rd_idx  <= '0;
@@ -65,13 +67,13 @@ module AccumulationUnit #(
   // Pixel index and result bank travel beside the data, LAT cycles from read to write.
   logic          tag_v   [LAT];
   logic [PW-1:0] tag_idx [LAT];
-  logic          tag_bank[LAT];
+  logic [RBW-1:0] tag_bank[LAT];
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
       for (int s = 0; s < LAT; s++) begin
         tag_v[s]    <= 1'b0;
         tag_idx[s]  <= '0;
-        tag_bank[s] <= 1'b0;
+        tag_bank[s] <= '0;
       end
     end else begin
       tag_v[0]    <= reading;
@@ -141,13 +143,13 @@ module AccumulationUnit #(
   end
 
   logic [PW-1:0] w_idx;
-  logic w_bank;
+  logic [RBW-1:0] w_bank;
   assign w_idx  = tag_idx[LAT-1];
   assign w_bank = tag_bank[LAT-1];
 
   assign write_en_o   = lvl_v[LEVELS];
   assign write_data_o = lvl_d[LEVELS][0];
-  assign write_addr_o = (w_bank ? BANK_OFFSET : 0) +
+  assign write_addr_o = int'(w_bank) * BANK_OFFSET +
                         ((TILE_ROW_OFFSET + int'(w_idx) / N) * MATRIX_WIDTH) + (TILE_COL_OFFSET + int'(w_idx) % N);
   assign written_o    = write_en_o && (w_idx == PW'(PIXELS - 1));
 

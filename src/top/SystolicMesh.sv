@@ -6,7 +6,8 @@ module SystolicMesh #(
     parameter DATA_WIDTH  = 32,
     parameter WIDE_READ   = 1,  // words per wide result read, one per consumer lane
     parameter HOST_WORDS  = MATRIX_SIZE,  // words per host write, one matrix row; must divide MATRIX_SIZE*MATRIX_SIZE
-    parameter COLLAPSE_K  = 1   // 1: one full-depth tile per output tile, N^2 PEs and no reduce; 0: depth slices and the reduce tree
+    parameter COLLAPSE_K  = 1,  // 1: one full-depth tile per output tile, N^2 PEs and no reduce; 0: depth slices and the reduce tree
+    parameter RESULT_BANKS = 3  // results held for the consumer; a third bank covers the reduce latency
 ) (
     input logic clk_i,
     input logic rstn_i,
@@ -55,9 +56,10 @@ module SystolicMesh #(
   logic start_accept, bcast_release;
   assign input_ready_o = !in_full[in_wr];
   assign start_accept  = start_matrix_mult_i && input_ready_o;
-  logic [1:0] out_full;  // per result bank: holds a finished, unreleased result
+  localparam int RBW = $clog2(RESULT_BANKS);
+  logic [RESULT_BANKS-1:0] out_full;  // per result bank: holds a finished, unreleased result
   logic loading_done;
-  logic out_wr, out_rd;  // bank the reducers write, bank the consumer reads
+  logic [RBW-1:0] out_wr, out_rd;  // bank the reducers write, bank the consumer reads
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -144,35 +146,38 @@ module SystolicMesh #(
     R_WRITING,
     R_FULL
   } rstate_t;
-  rstate_t out_state[2];
+  rstate_t out_state[RESULT_BANKS];
   logic set_done;  // one cycle: a set's last result was written
-  logic wr_bank_done;  // bank the next written set belongs to: sets finish in order
-  assign out_full[0]  = (out_state[0] == R_FULL);
-  assign out_full[1]  = (out_state[1] == R_FULL);
+  logic [RBW-1:0] wr_bank_done;  // bank the next written set belongs to: sets finish in order
+  function automatic logic [RBW-1:0] next_bank(input logic [RBW-1:0] b);
+    return (b == RBW'(RESULT_BANKS - 1)) ? '0 : b + 1'b1;
+  endfunction
+  for (genvar b = 0; b < RESULT_BANKS; b++) begin : OUT_FULL
+    assign out_full[b] = (out_state[b] == R_FULL);
+  end
   assign reduce_start = arrays_final && reducers_ready && (out_state[out_wr] == R_FREE);
   assign set_done     = reducers_written;
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
-      out_state[0] <= R_FREE;
-      out_state[1] <= R_FREE;
-      out_wr <= 1'b0;
-      out_rd <= 1'b0;
-      wr_bank_done <= 1'b0;
+      for (int b = 0; b < RESULT_BANKS; b++) out_state[b] <= R_FREE;
+      out_wr <= '0;
+      out_rd <= '0;
+      wr_bank_done <= '0;
       matrix_mult_complete_o <= 1'b0;
     end else begin
       matrix_mult_complete_o <= set_done;
       if (reduce_start) begin
         out_state[out_wr] <= R_WRITING;
-        out_wr <= ~out_wr;
+        out_wr <= next_bank(out_wr);
       end
       if (set_done) begin
         out_state[wr_bank_done] <= R_FULL;
-        wr_bank_done <= ~wr_bank_done;
+        wr_bank_done <= next_bank(wr_bank_done);
       end
       if (result_release_i && out_full[out_rd]) begin
         out_state[out_rd] <= R_FREE;
-        out_rd <= ~out_rd;
+        out_rd <= next_bank(out_rd);
       end
     end
   end
@@ -246,14 +251,14 @@ module SystolicMesh #(
   logic [WIDE_READ-1:0][31:0] wide_addr;
   always_comb
     for (int k = 0; k < WIDE_READ; k++)
-      wide_addr[k] = (out_rd ? GLOBAL_ELEMENTS : 0) + k * WIDE_STRIDE + wide_read_index_i;
+      wide_addr[k] = int'(out_rd) * GLOBAL_ELEMENTS + k * WIDE_STRIDE + wide_read_index_i;
 
   initial
     if (GLOBAL_ELEMENTS % WIDE_READ != 0)
       $error("SystolicMesh: WIDE_READ (%0d) must divide N*N (%0d)", WIDE_READ, GLOBAL_ELEMENTS);
 
   MeshOutputSram #(
-      .DEPTH(2 * GLOBAL_ELEMENTS),
+      .DEPTH(RESULT_BANKS * GLOBAL_ELEMENTS),
       .DATA_WIDTH(DATA_WIDTH),
       .NUM_PORTS(NUM_TILES),
       .WIDE(WIDE_READ)
@@ -264,7 +269,7 @@ module SystolicMesh #(
       .waddr_i(sram_addr_bank),
       .wdata_i(sram_data_agg),
       .read_enable_i(read_enable_i && read_addr_i < GLOBAL_ELEMENTS),
-      .read_addr_i(read_addr_i + (out_rd ? GLOBAL_ELEMENTS : 0)),
+      .read_addr_i(read_addr_i + int'(out_rd) * GLOBAL_ELEMENTS),
       .read_data_o(read_data_o),
       .read_valid_o(read_valid_o),
       .wide_enable_i(wide_read_enable_i && wide_read_index_i < WIDE_STRIDE),
@@ -315,6 +320,7 @@ module SystolicMesh #(
 
         AccumulationUnit #(
             .P(RPU),
+            .RESULT_BANKS(RESULT_BANKS),
             .N(TILE_SIZE),
             .DATA_WIDTH(DATA_WIDTH),
             .MATRIX_WIDTH(MATRIX_SIZE),
