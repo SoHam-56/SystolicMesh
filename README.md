@@ -12,13 +12,13 @@ A parameterised, tile-scalable systolic-array matrix-multiplication engine in Sy
 
 ### Systolic Mesh
 
-The top-level module is a grid of Systolic Arrays. The host writes A and B one matrix row per cycle (`HOST_WORDS = N`) into double-buffered staging memories; a broadcast copies each tile's operands into its array one tile row per cycle, all arrays fire together, and the results land in a double-buffered output SRAM read by the consumer.
+The top-level module is a grid of Systolic Arrays, and sets flow through it back to back. The host writes A and B one matrix row per cycle (`HOST_WORDS = N`) into two staging banks; the last row may come with the start. Three parts run at once: a broadcaster copies a full staging bank into every array's free operand bank, one tile row per cycle; the arrays feed and accumulate on their own; and a reducer per output tile combines each finished set's partial sums and writes it to one of `RESULT_BANKS` (default 4) result banks, which the consumer reads and releases. A set may carry a bias row, which the reducer adds to every element of its column.
 
-The mesh is parameterised by `MATRIX_SIZE = N` and `TILE_SIZE = T`. By default (`COLLAPSE_K = 1`) each of the `(N/T)²` output tiles has one T×T array that runs the full depth N, so there are N² PEs and no reduction step. With `COLLAPSE_K = 0` the problem is split into `(N/T)³` T×T tiles, `N/T` depth slices per output tile, and the AccumulationUnit sums the slices in a log2(N/T) adder tree; that uses N³/T PEs for a few cycles less latency.
+The mesh is parameterised by `MATRIX_SIZE = N` and `TILE_SIZE = T`. By default (`COLLAPSE_K = 1`) each of the `(N/T)²` output tiles has one T×T array that runs the full depth N, so there are N² PEs. With `COLLAPSE_K = 0` the problem is split into `(N/T)³` T×T arrays, `N/T` depth slices per output tile, and the reducer also sums the slices; that uses N³/T PEs for a few cycles less latency.
 
 ### Systolic Array
 
-Each Systolic Array is a T×T grid of Processing Elements holding its A block (T×K) and B block (K×T) locally. On start, row r of A and column c of B enter r and c cycles late and every operand moves one PE per cycle, so the arrays are fully synchronous: no handshakes between PEs and no drain step. Results are read straight from the PEs.
+Each Systolic Array is a T×T grid of Processing Elements with two operand banks, so the next set's A block (T×K) and B block (K×T) are written while the current set feeds. Row r of A and column c of B enter r and c cycles late and every operand moves one PE per cycle, so the arrays are fully synchronous. A queued set follows the previous one with no gap: row 0 takes k = 0 of the next set the cycle after k = K−1 of the current one.
 
 ### Processing Element
 
@@ -26,7 +26,7 @@ Each PE takes one product every cycle and computes
 
 $$C_{ij} = \sum_k A_{ik} \cdot B_{kj}$$
 
-The FP32 adder has a 5-cycle latency, so products rotate through six partial sums and are added pairwise at the end; the FP32 multiplier and adder come from the sibling `ArithmeticLibrary` and accept a new operation every cycle.
+The FP32 adder has a 5-cycle latency, so products rotate through six partial sums. Every K products the PE moves on to the next of `ACC_BANKS` (default 4) banks of partial sums, so one set accumulates while earlier ones finish and are read out; the reducer adds a pixel's six partials in its adder tree. The FP32 multiplier and adder come from the sibling `ArithmeticLibrary` and accept a new operation every cycle.
 
 > [!NOTE]
 > The array's numeric precision is determined entirely by the adder and multiplier modules sourced from `ArithmeticLibrary`. Swapping them out for alternative implementations (e.g. BFloat16, FP16, or integer) is sufficient to change the precision of the entire design — no other architectural changes are required. The `DATA_WIDTH` parameter must also be updated to match the bit-width of the new format (e.g. `DATA_WIDTH = 16` for FP16 or BFloat16).
@@ -47,40 +47,45 @@ When N is a perfect square the tests use a √N×√N kernel so a patch fills th
 
 ## Performance
 
-All figures measured with Verilator, verified against a Float64 NumPy reference (relative tolerance ≤ 1%). Cycles are from start to result for one matrix; 15 random sets per configuration.
+All figures measured with Verilator, verified against a Float64 NumPy reference (relative tolerance ≤ 1%); 21 random sets per configuration. The one-set-at-a-time mesh these replace is at git tag `serial_mesh_v1`.
 
-### Cycle counts
+### Throughput
+
+Sets stream at `max(N, T²)` cycles per set with collapse-k: the arrays need N cycles per set (one product per PE per cycle over the full depth), and each reducer reads its T² pixels one per cycle. At T = 4 that is one set every N cycles for N ≥ 16. Measured in the full SIENNA pipeline with a host that streams one row per cycle, a 256×256×64 matrix product runs at 32.0 cycles per set at N = 32 (every PE busy every cycle) and 17.4 at N = 16, where the consumer's per-set overhead shows.
+
+### Latency of one set
 
 | Matrix | Tile | Cycles, collapse-k (default) | PEs | Cycles, depth slices (`COLLAPSE_K = 0`) | PEs |
 |--------|------|------|------|------|------|
-| 16×16  | 2×2  | 71   | 256  | 56   | 2 048  |
-| 16×16  | 4×4  | 89   | 256  | 79   | 1 024  |
-| 16×16  | 8×8  | 149  | 256  | 146  | 512    |
-| 16×16  | 16×16| 365  | 256  | 365  | 256    |
-| 32×32  | 2×2  | 87   | 1 024 | 61  | 16 384 |
-| 32×32  | 4×4  | 105  | 1 024 | 84  | 8 192  |
-| 32×32  | 8×8  | 165  | 1 024 | 151 | 4 096  |
-| 32×32  | 16×16| 381  | 1 024 | 370 | 2 048  |
-| 32×32  | 32×32| 1 197| 1 024 | 1 197 | 1 024 |
-| 64×64  | 4×4  | 137  | 4 096 | 89  | 65 536 |
-| 64×64  | 8×8  | 197  | 4 096 | 156 | 32 768 |
-| 64×64  | 16×16| 413  | 4 096 | 375 | 16 384 |
-| 64×64  | 32×32| 1 229| 4 096 | 1 202 | 8 192 |
-| 64×64  | 64×64| 4 397| 4 096 | 4 397 | 4 096 |
+| 16×16  | 2×2  | 59   | 256  | 50   | 2 048  |
+| 16×16  | 4×4  | 77   | 256  | 70   | 1 024  |
+| 16×16  | 8×8  | 137  | 256  | 134  | 512    |
+| 16×16  | 16×16| 353  | 256  | 353  | 256    |
+| 32×32  | 2×2  | 75   | 1 024 | —   | 16 384 |
+| 32×32  | 4×4  | 93   | 1 024 | 75  | 8 192  |
+| 32×32  | 8×8  | 153  | 1 024 | 139 | 4 096  |
+| 32×32  | 16×16| 369  | 1 024 | 358 | 2 048  |
+| 32×32  | 32×32| 1 185| 1 024 | 1 185 | 1 024 |
+| 64×64  | 4×4  | 125  | 4 096 | —   | 65 536 |
+| 64×64  | 8×8  | 185  | 4 096 | —   | 32 768 |
+| 64×64  | 16×16| 401  | 4 096 | —   | 16 384 |
+| 64×64  | 32×32| 1 217| 4 096 | —   | 8 192 |
+| 64×64  | 64×64| 4 385| 4 096 | 4 385 | 4 096 |
 
-Cycle counts are fully deterministic across random seeds — hardware completion time is data-independent.
+A dash is a depth-slice build too large to finish on the machines used so far (Verilator needs more than 64 GB). Cycle counts are fully deterministic across random seeds — hardware completion time is data-independent.
 
 ### Scaling behaviour
 
-**Tile size dominates latency.** All arrays fire together, so the cycle count is set by one array: its skew (about 2T) plus the depth it accumulates (N with collapse-k, T without) plus the final pairwise add. Smaller tiles finish sooner.
+**Tile size dominates latency.** All arrays run in lockstep, so a set's latency is one array's skew (about 2T), its depth (N with collapse-k, T without), the adder latency, and the reducer reading T² pixels. Smaller tiles finish sooner and stream faster.
 
-**Doubling N costs little.** At T=4, N=16 → 32 → 64 takes 89 → 105 → 137 cycles with collapse-k, because the extra work is spread over more arrays running in parallel.
+**Doubling N costs little latency.** At T=4, N=16 → 32 → 64 takes 77 → 93 → 125 cycles with collapse-k, because the extra work is spread over more arrays running in parallel.
 
 ### Tile size trade-off
 
 | | Small tile (e.g. 2×2) | Large tile (e.g. 16×16) |
 |---|---|---|
 | **Latency** | Low ✓ | High ✗ |
+| **Throughput** | N cycles per set ✓ | T² cycles per set ✗ |
 | **Arrays** | Many ✗ | Few ✓ |
 | **PEs, collapse-k** | N² either way | N² either way |
 
