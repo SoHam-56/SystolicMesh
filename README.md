@@ -61,18 +61,18 @@ Sets stream at `max(N, T²)` cycles per set with collapse-k: the arrays need N c
 | 16×16  | 4×4  | 77   | 256  | 70   | 1 024  |
 | 16×16  | 8×8  | 137  | 256  | 134  | 512    |
 | 16×16  | 16×16| 353  | 256  | 353  | 256    |
-| 32×32  | 2×2  | 75   | 1 024 | —   | 16 384 |
+| 32×32  | 2×2  | 75   | 1 024 | 60  | 16 384 |
 | 32×32  | 4×4  | 93   | 1 024 | 75  | 8 192  |
 | 32×32  | 8×8  | 153  | 1 024 | 139 | 4 096  |
 | 32×32  | 16×16| 369  | 1 024 | 358 | 2 048  |
 | 32×32  | 32×32| 1 185| 1 024 | 1 185 | 1 024 |
 | 64×64  | 4×4  | 125  | 4 096 | —   | 65 536 |
 | 64×64  | 8×8  | 185  | 4 096 | —   | 32 768 |
-| 64×64  | 16×16| 401  | 4 096 | —   | 16 384 |
+| 64×64  | 16×16| 401  | 4 096 | 363 | 16 384 |
 | 64×64  | 32×32| 1 217| 4 096 | —   | 8 192 |
 | 64×64  | 64×64| 4 385| 4 096 | 4 385 | 4 096 |
 
-A dash is a depth-slice build too large to finish on the machines used so far (Verilator needs more than 64 GB). Cycle counts are fully deterministic across random seeds — hardware completion time is data-independent.
+A dash is a depth-slice build still running on a 128/256 GB machine (Verilator needs more than 64 GB for 32 768 PEs and up). Cycle counts are fully deterministic across random seeds — hardware completion time is data-independent.
 
 ### Scaling behaviour
 
