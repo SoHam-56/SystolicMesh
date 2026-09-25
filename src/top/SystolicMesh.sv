@@ -112,6 +112,7 @@ module SystolicMesh #(
 
   logic arrays_load_ready;  // every array has a free operand bank
   logic arrays_final;  // every array holds a final unread set
+  logic arrays_next_final;  // and the set after it is final too
   logic arrays_busy;
   logic reducers_ready, reducers_busy, reducers_read_done, reducers_written;
   logic ctrl_load_en, commit_q, set_launch, reduce_start;
@@ -160,7 +161,9 @@ module SystolicMesh #(
   for (genvar b = 0; b < RESULT_BANKS; b++) begin : OUT_FULL
     assign out_full[b] = (out_state[b] == R_FULL);
   end
-  assign reduce_start = arrays_final && reducers_ready && (out_state[out_wr] == R_FREE);
+  // Idle reducers take the oldest final set; reducers reading their last pixel take the next one, as the oldest is released.
+  assign reduce_start = reducers_ready && (out_state[out_wr] == R_FREE) &&
+                        (reducers_read_done ? arrays_next_final : arrays_final);
   assign set_done     = reducers_written;
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
@@ -319,12 +322,13 @@ module SystolicMesh #(
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][DATA_WIDTH-1:0] t_bias;  // the bias of the pixel being summed
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][$clog2(TILE_ELEMENTS)-1:0] t_addr;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] r_ready, r_busy, r_read_done, r_written;
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] a_ready, a_final, a_busy;
+  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] a_ready, a_final, a_next, a_busy;
 
   // Every array and reducer runs in lockstep; the mesh acts on the AND (or OR) of them all.
   always_comb begin
     arrays_load_ready = 1'b1;
     arrays_final = 1'b1;
+    arrays_next_final = 1'b1;
     arrays_busy = 1'b0;
     reducers_ready = 1'b1;
     reducers_busy = 1'b0;
@@ -339,6 +343,7 @@ module SystolicMesh #(
         for (int c = 0; c < TILES_PER_DIM; c++) begin
           arrays_load_ready &= a_ready[a][b][c];
           arrays_final &= a_final[a][b][c];
+          arrays_next_final &= a_next[a][b][c];
           arrays_busy |= a_busy[a][b][c];
         end
       end
@@ -383,6 +388,7 @@ module SystolicMesh #(
             // Collapsed: only depth slot 0 exists; the rest read as ready, final and idle.
             assign a_ready[i][j][k] = 1'b1;
             assign a_final[i][j][k] = 1'b1;
+            assign a_next[i][j][k]  = 1'b1;
             assign a_busy[i][j][k]  = 1'b0;
           end else begin : S
             logic [U-1:0][DATA_WIDTH-1:0] rd;
@@ -403,6 +409,7 @@ module SystolicMesh #(
                 .commit_i(commit_q),
                 .load_ready_o(a_ready[i][j][k]),
                 .set_final_o(a_final[i][j][k]),
+                .next_final_o(a_next[i][j][k]),
                 .read_enable_i(t_ren[i][j]),
                 .read_addr_i(t_addr[i][j]),
                 .read_data_o(rd),

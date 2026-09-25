@@ -22,6 +22,7 @@ module SystolicArray #(
     output logic                                  load_ready_o,  // an operand bank is free to write
 
     output logic                               set_final_o,    // the oldest unread set is final in every PE
+    output logic                               next_final_o,   // so is the one after it, for a reader about to release
     input  logic                               read_enable_i,
     input  logic [          $clog2(N*N)-1:0]   read_addr_i,
     output logic [U-1:0][DATA_WIDTH-1:0]       read_data_o,    // the pixel's U partial sums, one cycle later
@@ -176,12 +177,19 @@ module SystolicArray #(
     end
   end
 
-  logic all_final;
+  logic all_final, all_next;
+  logic [BW-1:0] rb_n;
+  assign rb_n = (rb == BW'(BANKS - 1)) ? '0 : rb + 1'b1;
   always_comb begin
     all_final = ab_busy[rb];
-    for (int p = 0; p < N * N; p++) all_final &= pe_final[p][rb];
+    all_next  = ab_busy[rb_n];
+    for (int p = 0; p < N * N; p++) begin
+      all_final &= pe_final[p][rb];
+      all_next  &= pe_final[p][rb_n];
+    end
   end
-  assign set_final_o = all_final;
+  assign set_final_o  = all_final;
+  assign next_final_o = all_next;
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin

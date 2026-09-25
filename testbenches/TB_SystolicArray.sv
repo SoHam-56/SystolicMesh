@@ -38,6 +38,7 @@ module TB_SystolicArray #(
       .commit_i            (commit),
       .load_ready_o        (load_ready),
       .set_final_o         (set_final),
+      .next_final_o        (),
       .read_enable_i       (rd_en),
       .read_addr_i         (rd_addr),
       .read_data_o         (rd_data),

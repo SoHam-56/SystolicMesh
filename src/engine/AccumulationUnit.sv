@@ -47,7 +47,7 @@ module AccumulationUnit #(
   logic [RBW-1:0] rd_bank;
   logic [N-1:0][DATA_WIDTH-1:0] rd_bias;
 
-  assign ready_o   = !reading;
+  assign ready_o   = !reading || read_done_o;  // the next set may start as the last pixel is read
   assign rd_en_o   = reading;
   assign rd_addr_o = rd_idx;
   assign read_done_o = reading && (rd_idx == PW'(PIXELS - 1));
@@ -57,7 +57,7 @@ module AccumulationUnit #(
       reading <= 1'b0;
       rd_idx  <= '0;
       rd_bank <= '0;
-    end else if (start_i && !reading) begin
+    end else if (start_i && ready_o) begin
       reading <= 1'b1;
       rd_idx  <= '0;
       rd_bank <= out_bank_i;
