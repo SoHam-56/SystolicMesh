@@ -8,7 +8,7 @@ module TB_SystolicMesh;
   localparam MATRIX_SIZE = 16;
   localparam TILE_SIZE = 4;
   localparam SRAM_SIZE = MATRIX_SIZE * MATRIX_SIZE;
-  localparam int HOST_WORDS = 1;  // words per host write
+  localparam int HOST_WORDS = MATRIX_SIZE;  // words per host write: one matrix row
 
   localparam int NUM_TEST_SETS = 5;
 

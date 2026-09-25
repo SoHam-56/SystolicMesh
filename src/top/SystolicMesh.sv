@@ -5,8 +5,8 @@ module SystolicMesh #(
     parameter TILE_SIZE   = 4,
     parameter DATA_WIDTH  = 32,
     parameter WIDE_READ   = 1,  // words per wide result read, one per consumer lane
-    parameter HOST_WORDS  = 1,  // words per host write; must divide MATRIX_SIZE*MATRIX_SIZE
-    parameter COLLAPSE_K  = 0   // 1: one full-depth tile per output tile, N^2 PEs and no reduce; 0: depth slices and the reduce tree
+    parameter HOST_WORDS  = MATRIX_SIZE,  // words per host write, one matrix row; must divide MATRIX_SIZE*MATRIX_SIZE
+    parameter COLLAPSE_K  = 1   // 1: one full-depth tile per output tile, N^2 PEs and no reduce; 0: depth slices and the reduce tree
 ) (
     input logic clk_i,
     input logic rstn_i,
