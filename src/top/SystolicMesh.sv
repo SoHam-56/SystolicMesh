@@ -58,6 +58,9 @@ module SystolicMesh #(
   logic start_accept, bcast_release;
   assign input_ready_o = !in_full[in_wr];
   assign start_accept  = start_matrix_mult_i && input_ready_o;
+  logic west_wr_ok, north_wr_ok;
+  assign west_wr_ok  = west_write_enable_i && input_ready_o && !west_write_reset_i && ptr_A < GLOBAL_ELEMENTS;
+  assign north_wr_ok = north_write_enable_i && input_ready_o && !north_write_reset_i && ptr_B < GLOBAL_ELEMENTS;
   localparam int RBW = $clog2(RESULT_BANKS);
   logic [RESULT_BANKS-1:0] out_full;  // per result bank: holds a finished, unreleased result
   logic loading_done;
@@ -71,17 +74,16 @@ module SystolicMesh #(
       in_wr   <= 1'b0;
       in_rd   <= 1'b0;
     end else begin
+      // A write in the start cycle is the set's last row and lands before the bank switches.
+      if (west_wr_ok)
+        for (int c = 0; c < HOST_WORDS; c++) mem_A[int'(in_wr)*GLOBAL_ELEMENTS+int'(ptr_A)+c] <= west_write_data_i[c];
+      if (north_wr_ok)
+        for (int c = 0; c < HOST_WORDS; c++) mem_B[int'(in_wr)*GLOBAL_ELEMENTS+int'(ptr_B)+c] <= north_write_data_i[c];
       // Rewind as each set is accepted; unrewound, the pointer wraps and reads back as empty.
       if (west_write_reset_i || start_accept) ptr_A <= '0;
-      else if (west_write_enable_i && input_ready_o && ptr_A < GLOBAL_ELEMENTS) begin
-        for (int c = 0; c < HOST_WORDS; c++) mem_A[int'(in_wr)*GLOBAL_ELEMENTS+int'(ptr_A)+c] <= west_write_data_i[c];
-        ptr_A <= ptr_A + HOST_WORDS;
-      end
+      else if (west_wr_ok) ptr_A <= ptr_A + HOST_WORDS;
       if (north_write_reset_i || start_accept) ptr_B <= '0;
-      else if (north_write_enable_i && input_ready_o && ptr_B < GLOBAL_ELEMENTS) begin
-        for (int c = 0; c < HOST_WORDS; c++) mem_B[int'(in_wr)*GLOBAL_ELEMENTS+int'(ptr_B)+c] <= north_write_data_i[c];
-        ptr_B <= ptr_B + HOST_WORDS;
-      end
+      else if (north_wr_ok) ptr_B <= ptr_B + HOST_WORDS;
       if (start_accept) begin
         in_full[in_wr] <= 1'b1;
         in_wr <= ~in_wr;
