@@ -7,7 +7,8 @@ module SystolicMesh #(
     parameter WIDE_READ   = 1,  // words per wide result read, one per consumer lane
     parameter HOST_WORDS  = MATRIX_SIZE,  // words per host write, one matrix row; must divide MATRIX_SIZE*MATRIX_SIZE
     parameter COLLAPSE_K  = 1,  // 1: one full-depth tile per output tile, N^2 PEs and no reduce; 0: depth slices and the reduce tree
-    parameter RESULT_BANKS = 3  // results held for the consumer; a third bank covers the reduce latency
+    parameter RESULT_BANKS = 4,  // results held for the consumer: four cover the reduce latency and the consumer's read
+    parameter ACC_BANKS    = 4   // partial-sum banks per PE: a bank returns about 3K cycles after its set starts, so 4 keep K per set
 ) (
     input logic clk_i,
     input logic rstn_i,
@@ -101,7 +102,7 @@ module SystolicMesh #(
   localparam int AK = COLLAPSE_K ? MATRIX_SIZE : TILE_SIZE;  // depth of each array's product
   localparam int U = (AK < 6) ? AK : 6;  // partial sums per array pixel
   localparam int RPU = RP * U;  // partials the reducer sums per pixel
-  localparam int BIAS_Q = 8;  // sets between their start and their reduce: 2 staging, 2 operand, 3 partial-sum banks
+  localparam int BIAS_Q = 1 << $clog2(4 + ACC_BANKS + 1);  // sets between start and reduce: staging, operand and partial-sum banks
 
   typedef enum logic [1:0] {
     B_IDLE,
@@ -398,7 +399,8 @@ module SystolicMesh #(
                 .DATA_WIDTH(DATA_WIDTH),
                 .WEST_WORDS(LW),
                 .NORTH_WORDS(LW),
-                .U(U)
+                .U(U),
+                .BANKS(ACC_BANKS)
             ) tile (
                 .clk_i(clk_i),
                 .rstn_i(rstn_i),

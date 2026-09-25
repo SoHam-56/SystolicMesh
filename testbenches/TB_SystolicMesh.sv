@@ -517,8 +517,8 @@ module TB_SystolicMesh;
 
   // ── Staging overrun: writes and a start while input_ready_o is low ─────────
   // The consumer withholds release until both result banks and both staging banks are full.
-  // Sets the mesh holds with no release: 2 staging banks, 2 operand and 3 partial-sum banks in every array, 3 result banks.
-  localparam int MESH_SETS = 10;
+  // Sets the mesh holds with no release: 2 staging banks, 2 operand and ACC_BANKS partial-sum banks per array, RESULT_BANKS.
+  localparam int MESH_SETS = 2 + 2 + 4 + 4;
 
   task automatic staging_overrun_test();
     string f_a, f_b, f_c;
