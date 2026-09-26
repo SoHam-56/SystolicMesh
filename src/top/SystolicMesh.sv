@@ -8,13 +8,21 @@ module SystolicMesh #(
     parameter HOST_WORDS  = MATRIX_SIZE,  // words per host write, one matrix row; must divide MATRIX_SIZE*MATRIX_SIZE
     parameter COLLAPSE_K  = 1,  // 1: one full-depth tile per output tile, N^2 PEs and no reduce; 0: depth slices and the reduce tree
     parameter RESULT_BANKS = 4,  // results held for the consumer: four cover the reduce latency and the consumer's read
-    parameter ACC_BANKS    = 4   // partial-sum banks per PE: a bank returns about 3K cycles after its set starts, so 4 keep K per set
+    parameter ACC_BANKS    = 4,  // partial-sum banks per PE: a bank returns about 3K cycles after its set starts, so 4 keep K per set
+    parameter WC_TILES     = 128,  // weight cache: N x N tiles of B, in two regions (tile MSB) so one fills while the other is read
+    parameter WCTW         = $clog2(WC_TILES),
+    parameter WCAW         = $clog2(WC_TILES * MATRIX_SIZE * MATRIX_SIZE)
 ) (
     input logic clk_i,
     input logic rstn_i,
     input logic start_matrix_mult_i,
     input logic                                  bias_valid_i,  // with the start: add bias_i[c] to every element of column c
     input logic [MATRIX_SIZE-1:0][DATA_WIDTH-1:0] bias_i,
+    input logic                                  weight_cached_i,  // with the start: B is cache tile weight_tile_i, the host sends only A
+    input logic [WCTW-1:0]                       weight_tile_i,
+    input logic                                  wc_write_enable_i,  // cache write of north_write_data_i at word wc_write_addr_i
+    input logic [WCAW-1:0]                       wc_write_addr_i,
+    output logic [1:0]                           wc_region_busy_o,   // a started, not yet broadcast set reads this region
 
     input logic                  north_write_enable_i,
     input logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] north_write_data_i,
@@ -52,6 +60,9 @@ module SystolicMesh #(
 
   logic [DATA_WIDTH-1:0] mem_A[0:2*GLOBAL_ELEMENTS-1];
   logic [DATA_WIDTH-1:0] mem_B[0:2*GLOBAL_ELEMENTS-1];
+  logic [DATA_WIDTH-1:0] wcache[WC_TILES*GLOBAL_ELEMENTS];
+  logic [1:0] in_cached;  // per staging bank: B comes from the cache
+  logic [WCTW-1:0] in_tile[2];  // and from this tile
   logic [$clog2(GLOBAL_ELEMENTS):0] ptr_A, ptr_B;
   initial if ((GLOBAL_ELEMENTS % HOST_WORDS) != 0) $error("SystolicMesh: HOST_WORDS (%0d) must divide %0d", HOST_WORDS, GLOBAL_ELEMENTS);
   logic [1:0] in_full;  // per staging bank: a started set not yet broadcast
@@ -74,6 +85,9 @@ module SystolicMesh #(
       in_full <= '0;
       in_wr   <= 1'b0;
       in_rd   <= 1'b0;
+      in_cached <= '0;
+      in_tile[0] <= '0;
+      in_tile[1] <= '0;
     end else begin
       // A write in the start cycle is the set's last row and lands before the bank switches.
       if (west_wr_ok)
@@ -87,6 +101,8 @@ module SystolicMesh #(
       else if (north_wr_ok) ptr_B <= ptr_B + HOST_WORDS;
       if (start_accept) begin
         in_full[in_wr] <= 1'b1;
+        in_cached[in_wr] <= weight_cached_i;
+        in_tile[in_wr] <= weight_tile_i;
         in_wr <= ~in_wr;
       end
       if (bcast_release) begin
@@ -96,6 +112,20 @@ module SystolicMesh #(
     end
   end
   assign west_queue_empty_o  = (ptr_A == 0);
+
+  // ── Weight cache: written from the north bus, read by the broadcaster for cached sets ──
+  always_ff @(posedge clk_i) begin
+    if (wc_write_enable_i)
+      for (int c = 0; c < HOST_WORDS; c++) wcache[int'(wc_write_addr_i)+c] <= north_write_data_i[c];
+  end
+  always_comb begin
+    wc_region_busy_o = '0;
+    for (int b = 0; b < 2; b++)
+      if (in_full[b] && in_cached[b]) wc_region_busy_o[in_tile[b][WCTW-1]] = 1'b1;
+  end
+  function automatic logic [DATA_WIDTH-1:0] b_word(input int addr);
+    return in_cached[in_rd] ? wcache[int'(in_tile[in_rd])*GLOBAL_ELEMENTS+addr] : mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr];
+  endfunction
   assign north_queue_empty_o = (ptr_B == 0);
 
   // ── Broadcast: copy a full staging bank into every array's free operand bank, one tile row per cycle ──
@@ -247,7 +277,7 @@ module SystolicMesh #(
             for (w_L = 0; w_L < MATRIX_SIZE; w_L++) begin
               rr_L = sub_r * TILES_PER_DIM + w_L / TILE_SIZE;
               addr_calc = rr_L * MATRIX_SIZE + j_L * TILE_SIZE + w_L % TILE_SIZE;
-              load_data_B[0][j_L][w_L] <= mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
+              load_data_B[0][j_L][w_L] <= b_word(addr_calc);
             end
             load_we_B[0][j_L] <= 1;
           end
@@ -265,7 +295,7 @@ module SystolicMesh #(
             for (j_L = 0; j_L < TILES_PER_DIM; j_L++) begin
               for (sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
                 addr_calc = ((k_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((j_L * TILE_SIZE) + sub_c);
-                load_data_B[k_L][j_L][sub_c] <= mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
+                load_data_B[k_L][j_L][sub_c] <= b_word(addr_calc);
               end
               load_we_B[k_L][j_L] <= 1;
             end
@@ -438,6 +468,11 @@ module SystolicMesh #(
     else $error("SystolicMesh: bias queue overflow");
   a_bias_queue_held: assert property (@(posedge clk_i) disable iff (!rstn_i) reduce_start |-> bq_n != 0)
     else $error("SystolicMesh: a reduce started with no bias queued");
+  a_wc_bus: assert property (@(posedge clk_i) disable iff (!rstn_i) !(wc_write_enable_i && north_write_enable_i))
+    else $error("SystolicMesh: a cache write and a B write share the north bus in one cycle");
+  a_wc_region_free: assert property (@(posedge clk_i) disable iff (!rstn_i)
+                                     wc_write_enable_i |-> !wc_region_busy_o[wc_write_addr_i[WCAW-1]])
+    else $error("SystolicMesh: cache write into a region a staged set still reads");
   a_staging_bank_full: assert property (@(posedge clk_i) disable iff (!rstn_i) bcast_release |-> in_full[in_rd])
     else $error("SystolicMesh: BROADCAST copied an empty staging bank");
   a_arrays_ready_on_launch: assert property (@(posedge clk_i) disable iff (!rstn_i) (load_we_A != '0) |-> arrays_load_ready)
