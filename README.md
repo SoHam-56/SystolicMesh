@@ -57,22 +57,24 @@ Sets stream at `max(N, T²)` cycles per set with collapse-k: the arrays need N c
 
 | Matrix | Tile | Cycles, collapse-k (default) | PEs | Cycles, depth slices (`COLLAPSE_K = 0`) | PEs |
 |--------|------|------|------|------|------|
-| 16×16  | 2×2  | 59   | 256  | 50   | 2 048  |
-| 16×16  | 4×4  | 77   | 256  | 70   | 1 024  |
+| 16×16  | 2×2  | 59   | 256  | 55   | 2 048  |
+| 16×16  | 4×4  | 77   | 256  | 75   | 1 024  |
 | 16×16  | 8×8  | 137  | 256  | 134  | 512    |
 | 16×16  | 16×16| 353  | 256  | 353  | 256    |
 | 32×32  | 2×2  | 75   | 1 024 | 60  | 16 384 |
-| 32×32  | 4×4  | 93   | 1 024 | 75  | 8 192  |
+| 32×32  | 4×4  | 93   | 1 024 | 80  | 8 192  |
 | 32×32  | 8×8  | 153  | 1 024 | 139 | 4 096  |
 | 32×32  | 16×16| 369  | 1 024 | 358 | 2 048  |
 | 32×32  | 32×32| 1 185| 1 024 | 1 185 | 1 024 |
-| 64×64  | 4×4  | 125  | 4 096 | —   | 65 536 |
-| 64×64  | 8×8  | 185  | 4 096 | —   | 32 768 |
+| 64×64  | 4×4  | 125  | 4 096 | 85  | 65 536 |
+| 64×64  | 8×8  | 185  | 4 096 | 144 | 32 768 |
 | 64×64  | 16×16| 401  | 4 096 | 363 | 16 384 |
-| 64×64  | 32×32| 1 217| 4 096 | —   | 8 192 |
+| 64×64  | 32×32| 1 217| 4 096 | 1 190 | 8 192 |
 | 64×64  | 64×64| 4 385| 4 096 | 4 385 | 4 096 |
 
-A dash is a depth-slice build still running on a 128/256 GB machine (Verilator needs more than 64 GB for 32 768 PEs and up). Cycle counts are fully deterministic across random seeds — hardware completion time is data-independent.
+Depth-slice builds need a lot of memory: 65 536 PEs took 182 GB and almost 5 hours. The 16×16 T=2/T=4 and 32×32 T=4 depth-slice figures are 5 cycles above their first measurement: there the bias input makes the reducer's partial count one more than a power of two, which adds a tree level.
+
+Every entry follows from the RTL: start to result written is `3T + K + T² + LAT + 17` cycles, where K is the depth each array multiplies (N with collapse-k, T with depth slices), U = min(K, 6) partial sums per PE, and `LAT = 1 + 5·⌈log2(RP·U + 1)⌉` is the reducer tree over RP depth slices plus the bias. The terms: 1 to launch, T + 2 to broadcast and commit, 2 feed registers, 2(T − 1) skew, K − 1 products, 8 multiply, 5 add, 2 to flag the set final, then T² reducer reads and LAT. Cycle counts are fully deterministic across random seeds — hardware completion time is data-independent.
 
 ### Scaling behaviour
 
