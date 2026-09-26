@@ -36,6 +36,8 @@ module TB_SystolicArray #(
       .west_write_enable_i (w_we),
       .west_write_data_i   (w_data),
       .commit_i            (commit),
+      .commit_fresh_i      (1'b1),
+      .commit_more_i       (1'b0),
       .load_ready_o        (load_ready),
       .set_final_o         (set_final),
       .next_final_o        (),

@@ -1,7 +1,7 @@
 `timescale 1ns / 100ps
 
 // Output-stationary PE for the pipelined SystolicArray: one product per cycle, sets back to back with no gap.
-// Every K products form a set; each set accumulates into its own bank of U partial sums, which the reader combines.
+// Every K products form a pass; a set is one or more passes, accumulated into its own bank of U partial sums, which the reader combines.
 module ProcessingElement #(
     parameter int DATA_WIDTH = 32,
     parameter int K          = 4,  // products per set
@@ -14,15 +14,20 @@ module ProcessingElement #(
     input  logic [          DATA_WIDTH-1:0] a_i,
     input  logic [          DATA_WIDTH-1:0] b_i,
     input  logic                            v_i,
+    input  logic                            fresh_i,     // with v_i: this pass starts a set, its first U products add to 0
+    input  logic                            more_i,      // with v_i: another pass of the same set follows this one
     output logic [          DATA_WIDTH-1:0] a_o,
     output logic [          DATA_WIDTH-1:0] b_o,
     output logic                            v_o,
+    output logic                            fresh_o,
+    output logic                            more_o,
     input  logic [                  BW-1:0] rd_bank_i,   // bank the reader looks at
     output logic [U-1:0][DATA_WIDTH-1:0]    partial_o,   // that bank's partial sums
     input  logic                            release_i,   // the reader is done with rd_bank_i
     output logic [               BANKS-1:0] final_o      // per bank: a finished set, all adds written back
 );
   localparam int ADD_LAT = 5;  // fp32Adder: valid_i at t, done_o at t+5
+  localparam int MUL_LAT = 8;  // fp32Multiplier: valid_i at t, done_o at t+8
   localparam int S = ADD_LAT + 1;  // a slot is read again S cycles after its add issues, one after the write-back
   localparam int SW = (U > 1) ? $clog2(U) : 1;
   localparam int CW = $clog2(K + 1);
@@ -34,12 +39,40 @@ module ProcessingElement #(
       a_o <= '0;
       b_o <= '0;
       v_o <= 1'b0;
+      fresh_o <= 1'b0;
+      more_o <= 1'b0;
     end else begin
       a_o <= a_i;
       b_o <= b_i;
       v_o <= v_i;
+      fresh_o <= fresh_i;
+      more_o <= more_i;
     end
   end
+
+  // The pass flags, delayed to meet their product out of the multiplier.
+  logic fresh_d[MUL_LAT], more_d[MUL_LAT], v_d[MUL_LAT];
+  always_ff @(posedge clk_i or negedge rstn_i) begin
+    if (!rstn_i) begin
+      for (int i = 0; i < MUL_LAT; i++) begin
+        fresh_d[i] <= 1'b0;
+        more_d[i] <= 1'b0;
+        v_d[i] <= 1'b0;
+      end
+    end else begin
+      fresh_d[0] <= fresh_i;
+      more_d[0] <= more_i;
+      v_d[0] <= v_i;
+      for (int i = 1; i < MUL_LAT; i++) begin
+        fresh_d[i] <= fresh_d[i-1];
+        more_d[i] <= more_d[i-1];
+        v_d[i] <= v_d[i-1];
+      end
+    end
+  end
+  logic prod_fresh, prod_more;
+  assign prod_fresh = fresh_d[MUL_LAT-1];
+  assign prod_more  = more_d[MUL_LAT-1];
 
   logic [DATA_WIDTH-1:0] prod, sum;
   logic prod_v, sum_v;
@@ -63,9 +96,9 @@ module ProcessingElement #(
   logic [CW-1:0] n_prod;  // products taken into cur
   logic [BANKS-1:0] taken;  // all K products of the bank issued, not yet released
 
-  // The first product into a slot is added to zero, so a reused bank needs no clear.
+  // The first product into a slot of a new set is added to zero, so a reused bank needs no clear; later passes add on.
   logic [DATA_WIDTH-1:0] add_a;
-  assign add_a = (n_prod < CW'(U)) ? '0 : acc[cur][slot];
+  assign add_a = (prod_fresh && n_prod < CW'(U)) ? '0 : acc[cur][slot];
 
   fp32Adder ADD (
       .clk_i      (clk_i),
@@ -122,7 +155,11 @@ module ProcessingElement #(
     end else begin
       if (sum_v) acc[bank_dly[ADD_LAT-1]][slot_dly[ADD_LAT-1]] <= sum;
       if (prod_v) begin
-        if (n_prod == CW'(K - 1)) begin
+        if (n_prod == CW'(K - 1) && prod_more) begin
+          // The set goes on: same bank, and the slot keeps turning so each slot's add has written back before its next.
+          slot   <= (slot == SW'(U - 1)) ? '0 : slot + 1'b1;
+          n_prod <= '0;
+        end else if (n_prod == CW'(K - 1)) begin
           taken[cur] <= 1'b1;
           cur        <= (cur == BW'(BANKS - 1)) ? '0 : cur + 1'b1;
           slot       <= '0;
@@ -145,6 +182,10 @@ module ProcessingElement #(
 `ifndef SYNTHESIS
   a_bank_free: assert property (@(posedge clk_i) disable iff (!rstn_i) (prod_v && n_prod == '0) |-> !taken[cur])
     else $error("ProcessingElement: a set started in bank %0d before the reader released it", cur);
+  a_flags_aligned: assert property (@(posedge clk_i) disable iff (!rstn_i) prod_v == v_d[MUL_LAT-1])
+    else $error("ProcessingElement: the pass flags are out of step with the multiplier");
+  a_fresh_slot0: assert property (@(posedge clk_i) disable iff (!rstn_i) (prod_v && n_prod == '0 && prod_fresh) |-> slot == '0)
+    else $error("ProcessingElement: a new set started part way through a bank's slots");
   a_release_final: assert property (@(posedge clk_i) disable iff (!rstn_i) release_i |-> final_o[rd_bank_i])
     else $error("ProcessingElement: bank %0d released before its set was final", rd_bank_i);
 `endif

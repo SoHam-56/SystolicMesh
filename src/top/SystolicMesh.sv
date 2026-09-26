@@ -16,6 +16,7 @@ module SystolicMesh #(
     input logic clk_i,
     input logic rstn_i,
     input logic start_matrix_mult_i,
+    input logic partial_i,  // with the start: keep this set's sums in the PEs, the next set adds to them and is reduced
     input logic                                  bias_valid_i,  // with the start: add bias_i[c] to every element of column c
     input logic [MATRIX_SIZE-1:0][DATA_WIDTH-1:0] bias_i,
     input logic                                  weight_cached_i,  // with the start: B is cache tile weight_tile_i, the host sends only A
@@ -62,6 +63,8 @@ module SystolicMesh #(
   logic [DATA_WIDTH-1:0] mem_B[0:2*GLOBAL_ELEMENTS-1];
   logic [DATA_WIDTH-1:0] wcache[WC_TILES*GLOBAL_ELEMENTS];
   logic [1:0] in_cached;  // per staging bank: B comes from the cache
+  logic [1:0] in_fresh, in_more;  // per staging bank: the set starts a sum; the next set continues it
+  logic last_partial;  // the previous accepted set continues into the next one
   logic [WCTW-1:0] in_tile[2];  // and from this tile
   logic [$clog2(GLOBAL_ELEMENTS):0] ptr_A, ptr_B;
   initial if ((GLOBAL_ELEMENTS % HOST_WORDS) != 0) $error("SystolicMesh: HOST_WORDS (%0d) must divide %0d", HOST_WORDS, GLOBAL_ELEMENTS);
@@ -86,6 +89,9 @@ module SystolicMesh #(
       in_wr   <= 1'b0;
       in_rd   <= 1'b0;
       in_cached <= '0;
+      in_fresh <= '0;
+      in_more <= '0;
+      last_partial <= 1'b0;
       in_tile[0] <= '0;
       in_tile[1] <= '0;
     end else begin
@@ -102,6 +108,9 @@ module SystolicMesh #(
       if (start_accept) begin
         in_full[in_wr] <= 1'b1;
         in_cached[in_wr] <= weight_cached_i;
+        in_fresh[in_wr] <= !last_partial;
+        in_more[in_wr] <= partial_i;
+        last_partial <= partial_i;
         in_tile[in_wr] <= weight_tile_i;
         in_wr <= ~in_wr;
       end
@@ -146,7 +155,7 @@ module SystolicMesh #(
   logic arrays_next_final;  // and the set after it is final too
   logic arrays_busy;
   logic reducers_ready, reducers_busy, reducers_read_done, reducers_written;
-  logic ctrl_load_en, commit_q, set_launch, reduce_start;
+  logic ctrl_load_en, commit_q, commit_fresh_q, commit_more_q, set_launch, reduce_start;
   integer load_idx;
 
   assign loading_done  = (load_idx >= TILE_SIZE - 1);  // one tile row per cycle
@@ -159,8 +168,12 @@ module SystolicMesh #(
       bstate   <= B_IDLE;
       load_idx <= 0;
       commit_q <= 1'b0;
+      commit_fresh_q <= 1'b0;
+      commit_more_q <= 1'b0;
     end else begin
       commit_q <= bcast_release;  // lands with the last registered row write
+      commit_fresh_q <= in_fresh[in_rd];
+      commit_more_q <= in_more[in_rd];
       case (bstate)
         B_IDLE:
         if (set_launch) begin
@@ -221,7 +234,9 @@ module SystolicMesh #(
     end
   end
 
-  // ── Bias queue: sets reach the reducers in the order they were started ──
+  // ── Bias queue: sums reach the reducers in the order they were started ──
+  logic bias_push;
+  assign bias_push = start_accept && !last_partial;
   logic [DATA_WIDTH-1:0] bias_q[BIAS_Q][MATRIX_SIZE];
   logic [BIAS_Q-1:0] bias_qv;
   logic [$clog2(BIAS_Q)-1:0] bq_wr, bq_rd;
@@ -238,13 +253,14 @@ module SystolicMesh #(
       bq_n    <= '0;
       bias_qv <= '0;
     end else begin
-      if (start_accept) begin
+      // One entry per sum: its first pass brings the bias, later passes of the same sum bring none.
+      if (bias_push) begin
         for (int c = 0; c < MATRIX_SIZE; c++) bias_q[bq_wr][c] <= bias_i[c];
         bias_qv[bq_wr] <= bias_valid_i;
         bq_wr <= bq_wr + 1'b1;
       end
       if (reduce_start) bq_rd <= bq_rd + 1'b1;
-      bq_n <= bq_n + (start_accept ? 1'b1 : 1'b0) - (reduce_start ? 1'b1 : 1'b0);
+      bq_n <= bq_n + (bias_push ? 1'b1 : 1'b0) - (reduce_start ? 1'b1 : 1'b0);
     end
   end
 
@@ -439,6 +455,8 @@ module SystolicMesh #(
                 .north_write_enable_i(load_we_B[k][j]),
                 .north_write_data_i(load_data_B[k][j]),
                 .commit_i(commit_q),
+                .commit_fresh_i(commit_fresh_q),
+                .commit_more_i(commit_more_q),
                 .load_ready_o(a_ready[i][j][k]),
                 .set_final_o(a_final[i][j][k]),
                 .next_final_o(a_next[i][j][k]),
@@ -464,7 +482,9 @@ module SystolicMesh #(
     else $error("SystolicMesh: a reduce started into a result bank that is not free");
   a_written_in_order: assert property (@(posedge clk_i) disable iff (!rstn_i) set_done |-> out_state[wr_bank_done] == R_WRITING)
     else $error("SystolicMesh: a set finished writing into a bank that was not being written");
-  a_bias_queue_room: assert property (@(posedge clk_i) disable iff (!rstn_i) start_accept |-> bq_n < BIAS_Q)
+  a_bias_first_pass: assert property (@(posedge clk_i) disable iff (!rstn_i) (start_accept && last_partial) |-> !bias_valid_i)
+    else $error("SystolicMesh: a bias came with a later pass of a sum; it belongs with the first");
+  a_bias_queue_room: assert property (@(posedge clk_i) disable iff (!rstn_i) bias_push |-> bq_n < BIAS_Q)
     else $error("SystolicMesh: bias queue overflow");
   a_bias_queue_held: assert property (@(posedge clk_i) disable iff (!rstn_i) reduce_start |-> bq_n != 0)
     else $error("SystolicMesh: a reduce started with no bias queued");
