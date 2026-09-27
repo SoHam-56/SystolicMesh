@@ -3,7 +3,10 @@
 module SystolicMesh #(
     parameter MATRIX_SIZE = 32,
     parameter TILE_SIZE   = 4,
-    parameter DATA_WIDTH  = 32,
+    parameter DATA_WIDTH  = 32,  // products, sums, bias and results: fp32
+    parameter OP_EXP_W    = 8,   // operand format of A and B: fp32 by default; bf16 is 8 and 7
+    parameter OP_MAN_W    = 23,
+    parameter OP_W        = 1 + OP_EXP_W + OP_MAN_W,
     parameter WIDE_READ   = 1,  // words per wide result read, one per consumer lane
     parameter HOST_WORDS  = MATRIX_SIZE,  // words per host write, one matrix row; must divide MATRIX_SIZE*MATRIX_SIZE
     parameter COLLAPSE_K  = 1,  // 1: one full-depth tile per output tile, N^2 PEs and no reduce; 0: depth slices and the reduce tree
@@ -26,10 +29,10 @@ module SystolicMesh #(
     output logic [1:0]                           wc_region_busy_o,   // a started, not yet broadcast set reads this region
 
     input logic                  north_write_enable_i,
-    input logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] north_write_data_i,
+    input logic [HOST_WORDS-1:0][OP_W-1:0] north_write_data_i,
     input logic                  north_write_reset_i,
     input logic                  west_write_enable_i,
-    input logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] west_write_data_i,
+    input logic [HOST_WORDS-1:0][OP_W-1:0] west_write_data_i,
     input logic                  west_write_reset_i,
 
     output logic north_queue_empty_o,
@@ -59,9 +62,9 @@ module SystolicMesh #(
   localparam RP = COLLAPSE_K ? 1 : TILES_PER_DIM;  // partial tiles per output tile
   localparam LW = COLLAPSE_K ? MATRIX_SIZE : TILE_SIZE;  // words per broadcast write
 
-  logic [DATA_WIDTH-1:0] mem_A[0:2*GLOBAL_ELEMENTS-1];
-  logic [DATA_WIDTH-1:0] mem_B[0:2*GLOBAL_ELEMENTS-1];
-  logic [DATA_WIDTH-1:0] wcache[WC_TILES*GLOBAL_ELEMENTS];
+  logic [OP_W-1:0] mem_A[0:2*GLOBAL_ELEMENTS-1];
+  logic [OP_W-1:0] mem_B[0:2*GLOBAL_ELEMENTS-1];
+  logic [OP_W-1:0] wcache[WC_TILES*GLOBAL_ELEMENTS];
   logic [1:0] in_cached;  // per staging bank: B comes from the cache
   logic [1:0] in_fresh, in_more;  // per staging bank: the set starts a sum; the next set continues it
   logic last_partial;  // the previous accepted set continues into the next one
@@ -132,7 +135,7 @@ module SystolicMesh #(
     for (int b = 0; b < 2; b++)
       if (in_full[b] && in_cached[b]) wc_region_busy_o[in_tile[b][WCTW-1]] = 1'b1;
   end
-  function automatic logic [DATA_WIDTH-1:0] b_word(input int addr);
+  function automatic logic [OP_W-1:0] b_word(input int addr);
     return in_cached[in_rd] ? wcache[int'(in_tile[in_rd])*GLOBAL_ELEMENTS+addr] : mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr];
   endfunction
   assign north_queue_empty_o = (ptr_B == 0);
@@ -268,7 +271,7 @@ module SystolicMesh #(
   assign mesh_busy = (bstate != B_IDLE) || arrays_busy || reducers_busy;
 
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] load_we_A, load_we_B;
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][LW-1:0][DATA_WIDTH-1:0] load_data_A, load_data_B;
+  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][LW-1:0][OP_W-1:0] load_data_A, load_data_B;
   integer i_L, j_L, k_L, sub_r, sub_c, addr_calc, w_L, rr_L;
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
@@ -443,6 +446,8 @@ module SystolicMesh #(
                 .N(TILE_SIZE),
                 .K(AK),
                 .DATA_WIDTH(DATA_WIDTH),
+                .OP_EXP_W(OP_EXP_W),
+                .OP_MAN_W(OP_MAN_W),
                 .WEST_WORDS(LW),
                 .NORTH_WORDS(LW),
                 .U(U),

@@ -3,7 +3,10 @@
 // Output-stationary PE for the pipelined SystolicArray: one product per cycle, sets back to back with no gap.
 // Every K products form a pass; a set is one or more passes, accumulated into its own bank of U partial sums, which the reader combines.
 module ProcessingElement #(
-    parameter int DATA_WIDTH = 32,
+    parameter int DATA_WIDTH = 32,  // products and sums: fp32
+    parameter int OP_EXP_W   = 8,   // operand format: fp32 by default; bf16 is 8 and 7, fp16 5 and 10
+    parameter int OP_MAN_W   = 23,
+    parameter int OP_W       = 1 + OP_EXP_W + OP_MAN_W,
     parameter int K          = 4,  // products per set
     parameter int BANKS      = 3,  // sets held at once: one accumulating, the older ones finishing or being read
     parameter int U          = (K < 6) ? K : 6,  // partial sums per set: the adder latency plus one
@@ -11,13 +14,13 @@ module ProcessingElement #(
 ) (
     input  logic                            clk_i,
     input  logic                            rstn_i,
-    input  logic [          DATA_WIDTH-1:0] a_i,
-    input  logic [          DATA_WIDTH-1:0] b_i,
+    input  logic [                OP_W-1:0] a_i,
+    input  logic [                OP_W-1:0] b_i,
     input  logic                            v_i,
     input  logic                            fresh_i,     // with v_i: this pass starts a set, its first U products add to 0
     input  logic                            more_i,      // with v_i: another pass of the same set follows this one
-    output logic [          DATA_WIDTH-1:0] a_o,
-    output logic [          DATA_WIDTH-1:0] b_o,
+    output logic [                OP_W-1:0] a_o,
+    output logic [                OP_W-1:0] b_o,
     output logic                            v_o,
     output logic                            fresh_o,
     output logic                            more_o,
@@ -27,7 +30,8 @@ module ProcessingElement #(
     output logic [               BANKS-1:0] final_o      // per bank: a finished set, all adds written back
 );
   localparam int ADD_LAT = 5;  // fp32Adder: valid_i at t, done_o at t+5
-  localparam int MUL_LAT = 8;  // fp32Multiplier: valid_i at t, done_o at t+8
+  localparam bit OP_FP32 = (OP_EXP_W == 8) && (OP_MAN_W == 23);
+  localparam int MUL_LAT = OP_FP32 ? 8 : 3;  // fp32Multiplier: done_o at t+8; fpMulWiden: t+3
   localparam int S = ADD_LAT + 1;  // a slot is read again S cycles after its add issues, one after the write-back
   localparam int SW = (U > 1) ? $clog2(U) : 1;
   localparam int CW = $clog2(K + 1);
@@ -77,18 +81,37 @@ module ProcessingElement #(
   logic [DATA_WIDTH-1:0] prod, sum;
   logic prod_v, sum_v;
 
-  fp32Multiplier MUL (
-      .clk_i      (clk_i),
-      .rstn_i     (rstn_i),
-      .valid_i    (v_i),
-      .A          (a_i),
-      .B          (b_i),
-      .result_o   (prod),
-      .done_o     (prod_v),
-      .overflow_o (),
-      .underflow_o(),
-      .invalid_o  ()
-  );
+  // fp32 operands use the fp32 multiplier; narrower floats multiply exactly into fp32.
+  if (OP_FP32) begin : G_MUL32
+    fp32Multiplier MUL (
+        .clk_i      (clk_i),
+        .rstn_i     (rstn_i),
+        .valid_i    (v_i),
+        .A          (a_i),
+        .B          (b_i),
+        .result_o   (prod),
+        .done_o     (prod_v),
+        .overflow_o (),
+        .underflow_o(),
+        .invalid_o  ()
+    );
+  end else begin : G_MULW
+    fpMulWiden #(
+        .EXP_W(OP_EXP_W),
+        .MAN_W(OP_MAN_W)
+    ) MUL (
+        .clk_i      (clk_i),
+        .rstn_i     (rstn_i),
+        .valid_i    (v_i),
+        .A          (a_i),
+        .B          (b_i),
+        .result_o   (prod),
+        .done_o     (prod_v),
+        .overflow_o (),
+        .underflow_o(),
+        .invalid_o  ()
+    );
+  end
 
   logic [DATA_WIDTH-1:0] acc[BANKS][U];
   logic [BW-1:0] cur;  // bank the next product joins
