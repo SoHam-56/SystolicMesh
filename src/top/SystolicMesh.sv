@@ -70,7 +70,9 @@ module SystolicMesh #(
   logic last_partial;  // the previous accepted set continues into the next one
   logic [WCTW-1:0] in_tile[2];  // and from this tile
   logic [$clog2(GLOBAL_ELEMENTS):0] ptr_A, ptr_B;
+`ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
   initial if ((GLOBAL_ELEMENTS % HOST_WORDS) != 0) $error("SystolicMesh: HOST_WORDS (%0d) must divide %0d", HOST_WORDS, GLOBAL_ELEMENTS);
+`endif
   logic [1:0] in_full;  // per staging bank: a started set not yet broadcast
   logic in_wr, in_rd;  // bank the host writes, bank BROADCAST reads
   logic start_accept, bcast_release;
@@ -272,7 +274,6 @@ module SystolicMesh #(
 
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] load_we_A, load_we_B;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][LW-1:0][OP_W-1:0] load_data_A, load_data_B;
-  integer i_L, j_L, k_L, sub_r, sub_c, addr_calc, w_L, rr_L;
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -282,18 +283,19 @@ module SystolicMesh #(
       load_we_A <= '{default: 0};
       load_we_B <= '{default: 0};
       if (ctrl_load_en) begin
-        sub_r = load_idx;  // tile row copied this cycle
+        automatic int sub_r = load_idx;  // tile row copied this cycle; block-local, so no register is inferred
+        automatic int addr_calc, rr_L;
         if (COLLAPSE_K) begin
           // Tile row i takes row sub_r of its T x N slab of A; tile column j takes N/T rows of its N x T slab of B.
-          for (i_L = 0; i_L < TILES_PER_DIM; i_L++) begin
-            for (sub_c = 0; sub_c < MATRIX_SIZE; sub_c++) begin
+          for (int i_L = 0; i_L < TILES_PER_DIM; i_L++) begin
+            for (int sub_c = 0; sub_c < MATRIX_SIZE; sub_c++) begin
               addr_calc = ((i_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + sub_c;
               load_data_A[i_L][0][sub_c] <= mem_A[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
             end
             load_we_A[i_L][0] <= 1;
           end
-          for (j_L = 0; j_L < TILES_PER_DIM; j_L++) begin
-            for (w_L = 0; w_L < MATRIX_SIZE; w_L++) begin
+          for (int j_L = 0; j_L < TILES_PER_DIM; j_L++) begin
+            for (int w_L = 0; w_L < MATRIX_SIZE; w_L++) begin
               rr_L = sub_r * TILES_PER_DIM + w_L / TILE_SIZE;
               addr_calc = rr_L * MATRIX_SIZE + j_L * TILE_SIZE + w_L % TILE_SIZE;
               load_data_B[0][j_L][w_L] <= b_word(addr_calc);
@@ -301,18 +303,18 @@ module SystolicMesh #(
             load_we_B[0][j_L] <= 1;
           end
         end else begin
-          for (i_L = 0; i_L < TILES_PER_DIM; i_L++) begin
-            for (k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
-              for (sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
+          for (int i_L = 0; i_L < TILES_PER_DIM; i_L++) begin
+            for (int k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
+              for (int sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
                 addr_calc = ((i_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((k_L * TILE_SIZE) + sub_c);
                 load_data_A[i_L][k_L][sub_c] <= mem_A[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
               end
               load_we_A[i_L][k_L] <= 1;
             end
           end
-          for (k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
-            for (j_L = 0; j_L < TILES_PER_DIM; j_L++) begin
-              for (sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
+          for (int k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
+            for (int j_L = 0; j_L < TILES_PER_DIM; j_L++) begin
+              for (int sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
                 addr_calc = ((k_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((j_L * TILE_SIZE) + sub_c);
                 load_data_B[k_L][j_L][sub_c] <= b_word(addr_calc);
               end
@@ -338,9 +340,11 @@ module SystolicMesh #(
     for (int k = 0; k < WIDE_READ; k++)
       wide_addr[k] = int'(out_rd) * GLOBAL_ELEMENTS + k * WIDE_STRIDE + wide_read_index_i;
 
+`ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
   initial
     if (GLOBAL_ELEMENTS % WIDE_READ != 0)
       $error("SystolicMesh: WIDE_READ (%0d) must divide N*N (%0d)", WIDE_READ, GLOBAL_ELEMENTS);
+`endif
 
   MeshOutputSram #(
       .DEPTH(RESULT_BANKS * GLOBAL_ELEMENTS),
