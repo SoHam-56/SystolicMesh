@@ -32,7 +32,9 @@ module ProcessingElement #(
   localparam int SW = (U > 1) ? $clog2(U) : 1;
   localparam int CW = $clog2(K + 1);
 
+`ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
   initial if (U > S || U > K) $error("ProcessingElement: U=%0d must not exceed min(K=%0d, %0d)", U, K, S);
+`endif
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin

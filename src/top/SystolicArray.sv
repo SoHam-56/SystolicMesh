@@ -36,10 +36,12 @@ module SystolicArray #(
   localparam int BW = (BANKS > 1) ? $clog2(BANKS) : 1;
   localparam int KW = (K > 1) ? $clog2(K) : 1;
 
+`ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
   initial begin
     if ((AD % WEST_WORDS) != 0 || (AD % NORTH_WORDS) != 0)
       $error("SystolicArray: write widths %0d/%0d must divide %0d", WEST_WORDS, NORTH_WORDS, AD);
   end
+`endif
 
   // ── Operand banks: A row-major (A[r][kk] at r*K+kk), B row-major (B[kk][c] at kk*N+c) ──
   logic [DATA_WIDTH-1:0] a_mem[2][AD];

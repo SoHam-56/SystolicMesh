@@ -24,12 +24,11 @@ module MeshOutputSram #(
 
   logic [DATA_WIDTH-1:0] mem[0:DEPTH-1];
 
+  // No write-enable from reset: the reducers write nothing while in reset, and a reset net should reach only resets.
   always_ff @(posedge clk_i) begin
-    if (rstn_i) begin
-      for (int p = 0; p < NUM_PORTS; p++) begin
-        if (we_i[p] && waddr_i[p] < DEPTH) begin
-          mem[waddr_i[p]] <= wdata_i[p];
-        end
+    for (int p = 0; p < NUM_PORTS; p++) begin
+      if (we_i[p] && waddr_i[p] < DEPTH) begin
+        mem[waddr_i[p]] <= wdata_i[p];
       end
     end
   end
@@ -58,8 +57,12 @@ module MeshOutputSram #(
     end
   end
 
+`ifndef SYNTHESIS
+`ifndef NO_ZERO_INIT  // silicon powers up random; NO_ZERO_INIT checks that nothing reads a word before it is written
   initial begin
     for (int i = 0; i < DEPTH; i++) mem[i] = 0;
   end
+`endif
+`endif
 
 endmodule
