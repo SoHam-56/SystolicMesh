@@ -34,6 +34,8 @@ import struct
 
 import numpy as np
 
+import stim_format
+
 # SIENNA_SEED shifts every generator seed; unset reproduces the fixed stimulus.
 _SEED_OFFSET = int(os.environ.get("SIENNA_SEED", "0"))
 
@@ -75,11 +77,8 @@ def _ref_matmul(A: np.ndarray, B: np.ndarray) -> np.ndarray:
 
 def _write_set(A: np.ndarray, B: np.ndarray,
                stim_dir: str, suffix: str = "") -> None:
-    """Compute C = A @ B and write all three .mem files for one set."""
-    C = _ref_matmul(A, B)
-    write_mem(os.path.join(stim_dir, f"matrixA{suffix}.mem"), A)
-    write_mem(os.path.join(stim_dir, f"matrixB{suffix}.mem"), B)
-    write_mem(os.path.join(stim_dir, f"matrixC{suffix}.mem"), C)
+    """Compute C = A @ B in the stimulus format and write all three .mem files for one set."""
+    stim_format.write_set(A, B, stim_dir, suffix)
 
 
 def _pad_to(sets: list, target: int) -> list:
@@ -195,6 +194,19 @@ def gen_mm_alternating(stim_dir: str, N: int) -> int:
     return _write_all(_pad_to(sets, MATMUL_NUM_SETS), stim_dir)
 
 
+def gen_mm_signed_zero(stim_dir: str, N: int) -> int:
+    """Rows of A all +0 or all -0 against B of mixed signs: every product is a signed zero and the PE's first add is 0 + p."""
+    sets = []
+    for s in range(MATMUL_NUM_SETS):
+        _seed(7100 + s)
+        A = np.random.uniform(-1, 1, (N, N)).astype(np.float32)
+        A[0::4, :] = np.float32(-0.0)
+        A[1::4, :] = np.float32(0.0)
+        B = np.random.uniform(-1, 1, (N, N)).astype(np.float32)
+        sets.append((A, B))
+    return _write_all(sets, stim_dir)
+
+
 # ---------------------------------------------------------------------------
 # Test catalogue
 #
@@ -210,6 +222,7 @@ MATMUL_TESTS = [
     dict(name="mm_large_values", description="Values ±100  (accumulator range stress)",         gen_fn=gen_mm_large_values),
     dict(name="mm_small_values", description="Values ±1e-6  (underflow / denormal stress)",     gen_fn=gen_mm_small_values),
     dict(name="mm_alternating",  description="±1 checkerboard  (sign alternation in accum.)",  gen_fn=gen_mm_alternating),
+    dict(name="mm_signed_zero",  description="Rows of +0 and -0  (sign of zero sums)",          gen_fn=gen_mm_signed_zero),
 ]
 
 

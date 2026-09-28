@@ -68,6 +68,8 @@ import struct
 
 import numpy as np
 
+import stim_format
+
 # SIENNA_SEED shifts every generator seed; unset reproduces the fixed stimulus.
 _SEED_OFFSET = int(os.environ.get("SIENNA_SEED", "0"))
 
@@ -94,11 +96,7 @@ def _f2h(f: float) -> str:
 
 def _write_set(A: np.ndarray, B: np.ndarray,
                stim_dir: str, suffix: str = "") -> np.ndarray:
-    C = _ref_matmul(A, B)
-    write_mem(os.path.join(stim_dir, f"matrixA{suffix}.mem"), A)
-    write_mem(os.path.join(stim_dir, f"matrixB{suffix}.mem"), B)
-    write_mem(os.path.join(stim_dir, f"matrixC{suffix}.mem"), C)
-    return C
+    return stim_format.write_set(A, B, stim_dir, suffix)
 
 
 def _pad_to(sets: list, target: int) -> list:
