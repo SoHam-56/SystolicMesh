@@ -104,7 +104,7 @@ verilator:
 		cp $(TB_DIR)/stimulus/*.mem $(VERILATOR_DIR); \
 		fi
 	@echo "-- Running Verilator simulation"
-	cd $(VERILATOR_DIR) && $(shell command -v stdbuf >/dev/null && echo stdbuf -oL) ./$(TOP_MODULE)_sim  # line-buffered, so a crash log shows how far it got
+	cd $(VERILATOR_DIR) && $(shell command -v stdbuf >/dev/null && echo stdbuf -oL) ./$(TOP_MODULE)_sim $(SIM_ARGS)  # line-buffered, so a crash log shows how far it got; SIM_ARGS go to the simulator
 	@echo "-- Verilator simulation complete"
 	@echo "-- Trace file: $(VERILATOR_DIR)/dump.vcd"
 
