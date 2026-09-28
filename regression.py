@@ -58,6 +58,10 @@ from datetime import datetime
 
 from conv_tests import CONV_NUM_SETS, CONV_TESTS
 from matmul_tests import MATMUL_NUM_SETS, MATMUL_TESTS, pow2_tile_sizes
+import stim_format
+
+FORMATS = {"fp32": (8, 23), "bf16": (8, 7)}
+FMT, COLLAPSE = "fp32", 1  # set from --format and --collapse-k
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -116,6 +120,10 @@ def _patch_tb(
         rf"\g<1>{num_test_sets}",
         patched,
     )
+    exp_w, man_w = FORMATS[FMT]
+    for name, val in (("EXP_W", exp_w), ("MAN_W", man_w), ("COLLAPSE_K", COLLAPSE)):
+        patched, n = re.subn(rf"(localparam\s+int\s+{name}\s*=\s*)\d+", rf"\g<1>{val}", patched)
+        assert n == 1, f"TB has no localparam int {name}"
     with open(tb_path, "w") as fh:
         fh.write(patched)
     return original
@@ -236,6 +244,7 @@ def _run_group(
 
     # ── Single TB patch for the whole group ──────────────────────────────
     original = _patch_tb(tb_path, N, tile, num_sets)
+    stim_format.configure(FMT, tile, COLLAPSE)
 
     try:
         for idx, test in enumerate(tests):
@@ -244,6 +253,7 @@ def _run_group(
             # Write stimulus — only .mem files change, TB is untouched
             os.makedirs(STIM_DIR, exist_ok=True)
             test["gen_fn"](STIM_DIR, N)
+            stim_format.check_widths(STIM_DIR)
 
             # make: compiles TB on first call (TB timestamp changed),
             #       skips compile on all subsequent calls (no RTL change)
@@ -335,7 +345,7 @@ def _report(results: list, N: int, fast: bool, group: str) -> str:
     L.append("* Tool: Verilator  |  Clock: 10 ns")
     L.append("=" * W)
 
-    path = os.path.join(RESULTS_DIR, "readiness_report.log")
+    path = os.path.join(RESULTS_DIR, f"readiness_report_{FMT}_ck{COLLAPSE}.log")
     with open(path, "w") as fh:
         fh.write("\n".join(L) + "\n")
     return path
@@ -372,7 +382,14 @@ def main() -> None:
         action="store_true",
         help="One tile size only (middle power-of-2 divisor of N)",
     )
+    parser.add_argument("--format", choices=sorted(FORMATS), default="fp32",
+                        help="number format of the build; narrow formats compare bit for bit")
+    parser.add_argument("--collapse-k", type=int, choices=[0, 1], default=1,
+                        help="1: full-depth arrays (the RTL default); 0: depth slices and the reduce tree")
     args = parser.parse_args()
+    global FMT, COLLAPSE
+    FMT, COLLAPSE = args.format, args.collapse_k
+    stim_format.configure(FMT, 2, COLLAPSE)
 
     N = args.matrix_size
     if N < 2 or (N & (N - 1)) != 0:

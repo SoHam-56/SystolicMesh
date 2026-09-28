@@ -2,7 +2,10 @@
 
 module TB_SystolicMesh;
 
-  localparam DATA_WIDTH = 32;
+  localparam int EXP_W = 8;  // patched by regression.py --format
+  localparam int MAN_W = 23;
+  localparam int COLLAPSE_K = 1;  // patched by regression.py --collapse-k
+  localparam DATA_WIDTH = 1 + EXP_W + MAN_W;
   localparam CLK_PERIOD = 10;
 
   localparam MATRIX_SIZE = 16;
@@ -22,7 +25,7 @@ module TB_SystolicMesh;
   localparam TOLERANCE_MODE = "RELATIVE";  // "ABSOLUTE", "RELATIVE", or "BOTH"
   localparam real ABS_TOL = 0.001;  // Max absolute difference allowed
   localparam real REL_TOL = 0.01;  // Max relative difference allowed (1%)
-  localparam logic ENABLE_TOL = 1'b1;  // 1 = Use tolerance, 0 = Exact match only
+  localparam logic ENABLE_TOL = (EXP_W == 8 && MAN_W == 23);  // fp32 tolerance; narrow formats compare bit for bit
 
   reg clk, rstn, start_mult;
 
@@ -81,6 +84,9 @@ module TB_SystolicMesh;
   SystolicMesh #(
       .MATRIX_SIZE(MATRIX_SIZE),
       .TILE_SIZE  (TILE_SIZE),
+      .EXP_W      (EXP_W),
+      .MAN_W      (MAN_W),
+      .COLLAPSE_K (COLLAPSE_K),
       .DATA_WIDTH (DATA_WIDTH),
       .HOST_WORDS (HOST_WORDS)
   ) dut (
@@ -180,11 +186,11 @@ module TB_SystolicMesh;
   // Checker self-test: a loose or broken compare must fail the run before any result is trusted.
   initial begin
     string st_info;
-    if (!check_tolerance(32'h3f800000, 32'h3f800003, st_info) ||   // 1.0 vs 1.0 + 3 ulp: pass
+    if (ENABLE_TOL && (!check_tolerance(32'h3f800000, 32'h3f800003, st_info) ||   // 1.0 vs 1.0 + 3 ulp: pass
         check_tolerance(32'h3f800000, 32'h40000000, st_info) ||    // 1.0 vs 2.0: fail
         check_tolerance(32'h3f800000, 32'h3f7ae148, st_info) ||    // 1.0 vs 0.98: fail
         check_tolerance(32'h3f800000, 32'hbf800000, st_info) ||    // 1.0 vs -1.0: fail
-        check_tolerance(32'hbf000000, 32'hbd4ccccd, st_info)) begin // -0.5 vs -0.05: fail
+        check_tolerance(32'hbf000000, 32'hbd4ccccd, st_info))) begin // -0.5 vs -0.05: fail
       $display("[FAIL] Tolerance checker self-test failed; results cannot be trusted");
       $finish;
     end
