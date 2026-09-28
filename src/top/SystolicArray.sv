@@ -5,22 +5,21 @@
 module SystolicArray #(
     parameter int N           = 4,
     parameter int K           = N,  // depth of the product; N for a square tile
-    parameter int DATA_WIDTH  = 32,  // partial sums: fp32
-    parameter int OP_EXP_W    = 8,   // operand format, fp32 by default
-    parameter int OP_MAN_W    = 23,
-    parameter int OP_W        = 1 + OP_EXP_W + OP_MAN_W,
+    parameter int EXP_W       = 8,   // the build's format: fp32 8/23 by default, bf16 8/7
+    parameter int MAN_W       = 23,
+    parameter int DATA_WIDTH  = 1 + EXP_W + MAN_W,  // every word: operands and partial sums
     parameter int WEST_WORDS  = K,  // A words per write: one row of A
     parameter int NORTH_WORDS = N,  // B words per write: one row of B
     parameter int BANKS       = 3,  // sets whose partials the PEs hold at once
-    parameter int U           = (K < 6) ? K : 6  // partial sums per pixel, combined by the reader
+    parameter int U           = (K < sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1) ? K : sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1  // partial sums per pixel, combined by the reader
 ) (
     input logic clk_i,
     input logic rstn_i,
 
     input logic                                   north_write_enable_i,
-    input logic [NORTH_WORDS-1:0][OP_W-1:0]       north_write_data_i,
+    input logic [NORTH_WORDS-1:0][DATA_WIDTH-1:0]       north_write_data_i,
     input logic                                   west_write_enable_i,
-    input logic [ WEST_WORDS-1:0][OP_W-1:0]       west_write_data_i,
+    input logic [ WEST_WORDS-1:0][DATA_WIDTH-1:0]       west_write_data_i,
     input logic                                   commit_i,      // the operands just written form a pass: queue it
     input logic                                   commit_fresh_i,  // with commit_i: the pass starts a set
     input logic                                   commit_more_i,   // with commit_i: another pass of the same set follows
@@ -47,8 +46,8 @@ module SystolicArray #(
 `endif
 
   // ── Operand banks: A row-major (A[r][kk] at r*K+kk), B row-major (B[kk][c] at kk*N+c) ──
-  logic [OP_W-1:0] a_mem[2][AD];
-  logic [OP_W-1:0] b_mem[2][AD];
+  logic [DATA_WIDTH-1:0] a_mem[2][AD];
+  logic [DATA_WIDTH-1:0] b_mem[2][AD];
   logic [$clog2(AD):0] wa, wb;
   logic lb;  // bank being written
   logic fb;  // oldest queued bank, next to feed
@@ -140,7 +139,7 @@ module SystolicArray #(
   end
 
   // ── Skewed feed registers ─────────────────────────────────────────────
-  logic [OP_W-1:0] a_feed[N], b_feed[N];
+  logic [DATA_WIDTH-1:0] a_feed[N], b_feed[N];
   logic v_feed[N], f_feed[N], m_feed[N];
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
@@ -164,8 +163,8 @@ module SystolicArray #(
   end
 
   // ── PE grid ───────────────────────────────────────────────────────────
-  logic [OP_W-1:0] a_w[N][N+1];  // a_w[r][c] enters PE(r,c) from the west
-  logic [OP_W-1:0] b_n[N+1][N];  // b_n[r][c] enters PE(r,c) from the north
+  logic [DATA_WIDTH-1:0] a_w[N][N+1];  // a_w[r][c] enters PE(r,c) from the west
+  logic [DATA_WIDTH-1:0] b_n[N+1][N];  // b_n[r][c] enters PE(r,c) from the north
   logic v_w[N][N+1], f_w[N][N+1], m_w[N][N+1];  // valid and pass flags travel east with A
   logic [U-1:0][DATA_WIDTH-1:0] part[N][N];
   logic [BANKS-1:0] pe_final[N*N];
@@ -182,9 +181,9 @@ module SystolicArray #(
   for (genvar r = 0; r < N; r++) begin : ROW
     for (genvar c = 0; c < N; c++) begin : COL
       ProcessingElement #(
+          .EXP_W     (EXP_W),
+          .MAN_W     (MAN_W),
           .DATA_WIDTH(DATA_WIDTH),
-          .OP_EXP_W  (OP_EXP_W),
-          .OP_MAN_W  (OP_MAN_W),
           .K         (K),
           .BANKS     (BANKS),
           .U         (U),

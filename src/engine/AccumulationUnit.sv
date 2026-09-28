@@ -6,7 +6,9 @@
 module AccumulationUnit #(
     parameter P = 8,
     parameter N = 4,
-    parameter DATA_WIDTH = 32,
+    parameter EXP_W = 8,  // the build's format: fp32 8/23, bf16 8/7
+    parameter MAN_W = 23,
+    parameter DATA_WIDTH = 1 + EXP_W + MAN_W,
     parameter MATRIX_WIDTH = 32,
     parameter TILE_ROW_OFFSET = 0,
     parameter TILE_COL_OFFSET = 0,
@@ -32,7 +34,11 @@ module AccumulationUnit #(
 );
   localparam int PIXELS = N * N;
   localparam int PW = (PIXELS > 1) ? $clog2(PIXELS) : 1;
-  localparam int ADD_LAT = 5;  // fp32Adder: valid_i at t, done_o at t+5
+  localparam int ADD_LAT = sienna_fmt_pkg::add_lat(EXP_W, MAN_W);  // the format's adder: valid_i at t, done_o at t+ADD_LAT
+
+  if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
+    $fatal(1, "AccumulationUnit: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
+  end
   localparam int LEVELS = $clog2(P);  // adder levels; 0 when there is one partial
   localparam int LAT = 1 + LEVELS * ADD_LAT;  // read issue to tree output
   localparam int BANK_OFFSET = MATRIX_WIDTH * MATRIX_WIDTH;
@@ -111,18 +117,14 @@ module AccumulationUnit #(
     logic [OUT_W-1:0] done_bits;
     for (genvar m = 0; m < OUT_W; m++) begin : NODE
       if (2 * m + 1 < IN_W) begin : ADD
-        fp32Adder adder (
-            .clk_i      (clk_i),
-            .rstn_i     (rstn_i),
-            .valid_i    (lvl_v[l]),
-            .A          (lvl_d[l][2*m]),
-            .B          (lvl_d[l][2*m+1]),
-            .result_o   (lvl_d[l+1][m]),
-            .done_o     (done_bits[m]),
-            .overflow_o (),
-            .underflow_o(),
-            .invalid_o  ()
-        );
+        if (sienna_fmt_pkg::is_fp32(EXP_W, MAN_W)) begin : G_FP32
+          fp32Adder adder (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(lvl_v[l]), .A(lvl_d[l][2*m]), .B(lvl_d[l][2*m+1]),
+                           .result_o(lvl_d[l+1][m]), .done_o(done_bits[m]), .overflow_o(), .underflow_o(), .invalid_o());
+        end else begin : G_FP
+          fpAdder #(.EXP_W(EXP_W), .MAN_W(MAN_W)) adder (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(lvl_v[l]),
+              .A(lvl_d[l][2*m]), .B(lvl_d[l][2*m+1]), .result_o(lvl_d[l+1][m]), .done_o(done_bits[m]),
+              .overflow_o(), .underflow_o(), .invalid_o());
+        end
       end else begin : PASS
         // An odd entry out: delay it by the adder latency so it stays aligned with its level.
         logic [DATA_WIDTH-1:0] dly[ADD_LAT];
