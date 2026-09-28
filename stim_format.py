@@ -46,6 +46,11 @@ def _f2h(v) -> str:
 
 def write_set(A, B, stim_dir, suffix=""):
     """Write matrixA/B/C<suffix>.mem for one set; returns C as floats."""
+    N = B.shape[1]
+    # A set shorter than N x N is written with its zero rows: the staging bank is not reset, so the test must not rely on it.
+    assert A.shape[1] == N and A.shape[0] <= N and B.shape[0] <= N, f"unsupported set shapes {A.shape} and {B.shape}"
+    A = np.vstack([A, np.zeros((N - A.shape[0], N), dtype=np.float32)]).astype(np.float32)
+    B = np.vstack([B, np.zeros((N - B.shape[0], N), dtype=np.float32)]).astype(np.float32)
     if FORMAT == "fp32":
         C = (A.astype(np.float64) @ B.astype(np.float64)).astype(np.float32)
         for name, M in (("A", A), ("B", B), ("C", C)):
@@ -53,12 +58,8 @@ def write_set(A, B, stim_dir, suffix=""):
                 for v in np.asarray(M).flatten():
                     fh.write(_f2h(v) + "\n")
         return C
-    N = B.shape[1]
-    # A set shorter than N x N fills the staging bank row-major and leaves the rest zero; the model sees the same bank.
-    assert A.shape[1] == N and B.shape[0] <= N and A.shape[0] <= N, f"unsupported set shapes {A.shape} and {B.shape}"
     Ab, Bb = to_bits(A), to_bits(B)
-    pad = lambda M: np.concatenate([M.flatten(), np.zeros(N * N - M.size, dtype=np.int64)]).reshape(N, N)
-    Cb = mesh_model.matmul(fpu.FORMATS[FORMAT], [(pad(Ab), pad(Bb))], N, TILE, COLLAPSE_K)[:A.shape[0], :]
+    Cb = mesh_model.matmul(fpu.FORMATS[FORMAT], [(Ab, Bb)], N, TILE, COLLAPSE_K)
     for name, M in (("A", Ab), ("B", Bb), ("C", Cb)):
         _write_words(os.path.join(stim_dir, f"matrix{name}{suffix}.mem"), M)
     return to_float(Cb)
