@@ -29,7 +29,9 @@ DESIGN_FILES = \
   ../ArithmeticLibrary/Multipliers/FP/src/fpMultiplier.sv \
   ../ArithmeticLibrary/Adders/FP32/src/LZC.sv \
   ../ArithmeticLibrary/Adders/FP32/src/fp32Adder.sv \
-  ../ArithmeticLibrary/Adders/FP/src/fpAdder.sv
+  ../ArithmeticLibrary/Adders/FP/src/fpAdder.sv \
+  ../ArithmeticLibrary/Multipliers/Int/src/intMultiplier.sv \
+  ../ArithmeticLibrary/Adders/Int/src/intAdder.sv
 
 TOP_MODULE = TB_SystolicMesh
 TESTBENCH = $(TOP_MODULE).sv
