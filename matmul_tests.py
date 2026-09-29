@@ -26,6 +26,8 @@ Test catalogue
   mm_large_values  Values ±100  (accumulator range stress)
   mm_small_values  Values ±1e-6  (underflow / denormal stress)
   mm_alternating   ±1 checkerboard  (sign alternation in accumulation)
+
+int8: stim_format.rand draws the whole int8 range; mm_large_values uses -128 and 127, mm_small_values -1, 0 and 1, mm_signed_zero zeros.
 """
 
 import argparse
@@ -77,8 +79,9 @@ def _ref_matmul(A: np.ndarray, B: np.ndarray) -> np.ndarray:
 
 def _write_set(A: np.ndarray, B: np.ndarray,
                stim_dir: str, suffix: str = "") -> None:
-    """Compute C = A @ B in the stimulus format and write all three .mem files for one set."""
-    stim_format.write_set(A, B, stim_dir, suffix)
+    """Compute C = A @ B in the stimulus format and write its .mem files for one set (int8: with the set's bias)."""
+    bias = stim_format.int8_bias(B.shape[1], suffix) if stim_format.is_int() else None
+    stim_format.write_set(A, B, stim_dir, suffix, bias)
 
 
 def _pad_to(sets: list, target: int) -> list:
@@ -94,8 +97,8 @@ def _pad_to(sets: list, target: int) -> list:
     dim = sets[0][0].shape[0]
     while len(sets) < target:
         _seed(9000 + len(sets))
-        A = np.random.uniform(-1, 1, (dim, dim)).astype(np.float32)
-        B = np.random.uniform(-1, 1, (dim, dim)).astype(np.float32)
+        A = stim_format.rand(-1, 1, (dim, dim)).astype(np.float32)
+        B = stim_format.rand(-1, 1, (dim, dim)).astype(np.float32)
         sets.append((A, B))
     return sets[:target]
 
@@ -119,8 +122,8 @@ def gen_mm_random(stim_dir: str, N: int) -> int:
     sets = []
     for i in range(5):
         _seed(100 + i)
-        A = np.random.uniform(-1, 1, (N, N)).astype(np.float32)
-        B = np.random.uniform(-1, 1, (N, N)).astype(np.float32)
+        A = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
+        B = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
         sets.append((A, B))
     return _write_all(_pad_to(sets, MATMUL_NUM_SETS), stim_dir)
 
@@ -130,7 +133,7 @@ def gen_mm_identity(stim_dir: str, N: int) -> int:
     sets = []
     for i in range(3):
         _seed(200 + i)
-        A = np.random.uniform(-1, 1, (N, N)).astype(np.float32)
+        A = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
         sets.append((A, np.eye(N, dtype=np.float32)))
     return _write_all(_pad_to(sets, MATMUL_NUM_SETS), stim_dir)
 
@@ -140,7 +143,7 @@ def gen_mm_zero_b(stim_dir: str, N: int) -> int:
     sets = []
     for i in range(3):
         _seed(300 + i)
-        A = np.random.uniform(-1, 1, (N, N)).astype(np.float32)
+        A = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
         sets.append((A, np.zeros((N, N), dtype=np.float32)))
     return _write_all(_pad_to(sets, MATMUL_NUM_SETS), stim_dir)
 
@@ -156,30 +159,46 @@ def gen_mm_ones(stim_dir: str, N: int) -> int:
 def gen_mm_diagonal(stim_dir: str, N: int) -> int:
     """Diagonal A @ diagonal B = diag(d_a * d_b)  — tests sparse data flow."""
     _seed(400)
-    d_a = np.random.uniform(-2, 2, N).astype(np.float32)
-    d_b = np.random.uniform(-2, 2, N).astype(np.float32)
+    d_a = stim_format.rand(-2, 2, N).astype(np.float32)
+    d_b = stim_format.rand(-2, 2, N).astype(np.float32)
     sets = [(np.diag(d_a), np.diag(d_b))]
     return _write_all(_pad_to(sets, MATMUL_NUM_SETS), stim_dir)
 
 
 def gen_mm_large_values(stim_dir: str, N: int) -> int:
     """Values near ±100  — stresses accumulator range without overflow."""
+    if stim_format.is_int():  # int8: the signed extremes
+        lo, hi = np.float32(-128), np.float32(127)
+        sets = [(np.full((N, N), lo), np.full((N, N), lo)),  # every product +16384: the largest sum, N * 2^14
+                (np.full((N, N), lo), np.full((N, N), hi))]  # every product -16256: the most negative sum
+        for i in range(3):
+            _seed(500 + i)
+            sets.append((np.random.choice([lo, hi], (N, N)).astype(np.float32),
+                         np.random.choice([lo, hi], (N, N)).astype(np.float32)))
+        return _write_all(sets, stim_dir)
     sets = []
     for i in range(3):
         _seed(500 + i)
-        A = np.random.uniform(-100, 100, (N, N)).astype(np.float32)
-        B = np.random.uniform(-100, 100, (N, N)).astype(np.float32)
+        A = stim_format.rand(-100, 100, (N, N)).astype(np.float32)
+        B = stim_format.rand(-100, 100, (N, N)).astype(np.float32)
         sets.append((A, B))
     return _write_all(_pad_to(sets, MATMUL_NUM_SETS), stim_dir)
 
 
 def gen_mm_small_values(stim_dir: str, N: int) -> int:
     """Values near ±1e-6  — stresses underflow / denormal handling."""
+    if stim_format.is_int():  # int8: products of -1, 0 and 1
+        sets = []
+        for i in range(3):
+            _seed(600 + i)
+            sets.append((np.random.randint(-1, 2, (N, N)).astype(np.float32),
+                         np.random.randint(-1, 2, (N, N)).astype(np.float32)))
+        return _write_all(_pad_to(sets, MATMUL_NUM_SETS), stim_dir)
     sets = []
     for i in range(3):
         _seed(600 + i)
-        A = np.random.uniform(-1e-6, 1e-6, (N, N)).astype(np.float32)
-        B = np.random.uniform(-1e-6, 1e-6, (N, N)).astype(np.float32)
+        A = stim_format.rand(-1e-6, 1e-6, (N, N)).astype(np.float32)
+        B = stim_format.rand(-1e-6, 1e-6, (N, N)).astype(np.float32)
         sets.append((A, B))
     return _write_all(_pad_to(sets, MATMUL_NUM_SETS), stim_dir)
 
@@ -199,10 +218,10 @@ def gen_mm_signed_zero(stim_dir: str, N: int) -> int:
     sets = []
     for s in range(MATMUL_NUM_SETS):
         _seed(7100 + s)
-        A = np.random.uniform(-1, 1, (N, N)).astype(np.float32)
+        A = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
         A[0::4, :] = np.float32(-0.0)
         A[1::4, :] = np.float32(0.0)
-        B = np.random.uniform(-1, 1, (N, N)).astype(np.float32)
+        B = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
         sets.append((A, B))
     return _write_all(sets, stim_dir)
 
@@ -219,8 +238,8 @@ MATMUL_TESTS = [
     dict(name="mm_zero_b",       description="A @ 0 = 0  (zero propagation)",                  gen_fn=gen_mm_zero_b),
     dict(name="mm_ones",         description="[1s] @ [1s] = N×[1s]  (known integer result)",   gen_fn=gen_mm_ones),
     dict(name="mm_diagonal",     description="Diagonal × diagonal  (sparse data flow)",         gen_fn=gen_mm_diagonal),
-    dict(name="mm_large_values", description="Values ±100  (accumulator range stress)",         gen_fn=gen_mm_large_values),
-    dict(name="mm_small_values", description="Values ±1e-6  (underflow / denormal stress)",     gen_fn=gen_mm_small_values),
+    dict(name="mm_large_values", description="Values ±100; int8 -128/127  (accumulator range stress)", gen_fn=gen_mm_large_values),
+    dict(name="mm_small_values", description="Values ±1e-6; int8 -1/0/1  (underflow stress)", gen_fn=gen_mm_small_values),
     dict(name="mm_alternating",  description="±1 checkerboard  (sign alternation in accum.)",  gen_fn=gen_mm_alternating),
     dict(name="mm_signed_zero",  description="Rows of +0 and -0  (sign of zero sums)",          gen_fn=gen_mm_signed_zero),
 ]

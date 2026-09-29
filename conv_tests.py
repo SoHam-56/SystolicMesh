@@ -21,6 +21,8 @@ Standalone usage
 Supported matrix sizes: perfect-square powers of 2
   N=16  → K=4   N=64  → K=8   N=256 → K=16
 
+int8: stim_format.rand draws images and kernels over the whole int8 range, so conv_large_kern is conv_random's distribution.
+
 ────────────────────────────────────────────────────────────────────────────
 DATA LAYOUT REFERENCE  (for RTL im2col pre-processor)
 ────────────────────────────────────────────────────────────────────────────
@@ -96,7 +98,8 @@ def _f2h(f: float) -> str:
 
 def _write_set(A: np.ndarray, B: np.ndarray,
                stim_dir: str, suffix: str = "") -> np.ndarray:
-    return stim_format.write_set(A, B, stim_dir, suffix)
+    bias = stim_format.int8_bias(B.shape[1], suffix) if stim_format.is_int() else None
+    return stim_format.write_set(A, B, stim_dir, suffix, bias)
 
 
 def _pad_to(sets: list, target: int) -> list:
@@ -157,7 +160,7 @@ def _general_pair(N: int, seed: int, kernel: str = "random", grid=None, stride=N
     S = stride or K
     side = (g - 1) * S + K
     _seed(seed)
-    image = np.random.uniform(-1, 1, (side, side, c_in)).astype(np.float32)
+    image = stim_format.rand(-1, 1, (side, side, c_in)).astype(np.float32)
     patches, _ = _im2col_patches(image, K, S)
 
     def one_filter():
@@ -170,7 +173,7 @@ def _general_pair(N: int, seed: int, kernel: str = "random", grid=None, stride=N
             v[((K // 2) * K + K // 2) * c_in] = 1.0
             return v
         lim = 10.0 if kernel == "large" else 1.0
-        return np.random.uniform(-lim, lim, D).astype(np.float32)
+        return stim_format.rand(-lim, lim, D).astype(np.float32)
 
     B = np.zeros((N, N), dtype=np.float32)
     if n_filters > 1:
@@ -209,8 +212,8 @@ def _basic_pair(img_size: int, K: int, seed: int) -> tuple:
     """Build one (A, B) im2col pair for a non-overlapping-stride test."""
     P           = K * K
     _seed(seed)
-    image       = np.random.uniform(-1, 1, (img_size, img_size)).astype(np.float32)
-    kernel      = np.random.uniform(-1, 1, (K, K)).astype(np.float32)
+    image       = stim_format.rand(-1, 1, (img_size, img_size)).astype(np.float32)
+    kernel      = stim_format.rand(-1, 1, (K, K)).astype(np.float32)
     patches, _  = _im2col_patches(image, K, K)
     num_patches = len(patches)
     A           = np.zeros((P, P), dtype=np.float32)
@@ -242,7 +245,7 @@ def gen_conv_zero_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
     sets = []
     for i in range(3):
         _seed(800 + i)
-        image   = np.random.uniform(-1, 1, (img, img)).astype(np.float32)
+        image   = stim_format.rand(-1, 1, (img, img)).astype(np.float32)
         patches, _ = _im2col_patches(image, K, K)
         A = np.stack(patches).astype(np.float32)
         B = np.zeros((P, P), dtype=np.float32)
@@ -259,7 +262,7 @@ def gen_conv_ones_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
     sets = []
     for i in range(3):
         _seed(900 + i)
-        image   = np.random.uniform(-1, 1, (img, img)).astype(np.float32)
+        image   = stim_format.rand(-1, 1, (img, img)).astype(np.float32)
         patches, _ = _im2col_patches(image, K, K)
         A = np.stack(patches).astype(np.float32)
         B = np.tile(np.ones(P, dtype=np.float32)[:, np.newaxis], (1, P))
@@ -279,7 +282,7 @@ def gen_conv_impulse_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
     sets = []
     for i in range(3):
         _seed(1000 + i)
-        image   = np.random.uniform(-1, 1, (img, img)).astype(np.float32)
+        image   = stim_format.rand(-1, 1, (img, img)).astype(np.float32)
         patches, _ = _im2col_patches(image, K, K)
         A = np.stack(patches).astype(np.float32)
         B = np.tile(k_vec[:, np.newaxis], (1, P))
@@ -306,9 +309,9 @@ def gen_conv_large_kernel(stim_dir: str, N: int, debug: bool = False) -> int:
     sets = []
     for i in range(3):
         _seed(1200 + i)
-        image   = np.random.uniform(-1, 1, (img, img)).astype(np.float32)
+        image   = stim_format.rand(-1, 1, (img, img)).astype(np.float32)
         patches, _ = _im2col_patches(image, K, K)
-        k_vec   = np.random.uniform(-10, 10, P).astype(np.float32)
+        k_vec   = stim_format.rand(-10, 10, P).astype(np.float32)
         A = np.stack(patches).astype(np.float32)
         B = np.tile(k_vec[:, np.newaxis], (1, P))
         sets.append((A, B))
@@ -342,8 +345,8 @@ def gen_conv_adv_stride(stim_dir: str, N: int,
     img_size = (img_out - 1) * S + K           # smallest image giving img_out patches/side
 
     _seed(seed)
-    image   = np.random.uniform(-1, 1, (img_size, img_size)).astype(np.float32)
-    kernel  = np.random.uniform(-1, 1, (K, K)).astype(np.float32)
+    image   = stim_format.rand(-1, 1, (img_size, img_size)).astype(np.float32)
+    kernel  = stim_format.rand(-1, 1, (K, K)).astype(np.float32)
     k_vec   = kernel.flatten()
     B       = np.tile(k_vec[:, np.newaxis], (1, P)).astype(np.float32)
 
@@ -400,8 +403,8 @@ def gen_conv_adv_multi_out(stim_dir: str, N: int,
     sets = []
     for i in range(3):
         _seed(42 + i)
-        image   = np.random.uniform(-1, 1, (img, img)).astype(np.float32)
-        filters = np.random.uniform(-1, 1, (P, P)).astype(np.float32)
+        image   = stim_format.rand(-1, 1, (img, img)).astype(np.float32)
+        filters = stim_format.rand(-1, 1, (P, P)).astype(np.float32)
         patches, _ = _im2col_patches(image, K, K)
         A = np.stack(patches).astype(np.float32)
         B = filters.T.astype(np.float32)
@@ -448,8 +451,8 @@ def gen_conv_adv_multi_in(stim_dir: str, N: int,
     sets = []
     for i in range(3):
         _seed(seed + i)
-        image   = np.random.uniform(-1, 1, (IMG, IMG, C_IN)).astype(np.float32)
-        filters = np.random.uniform(-1, 1, (N_OUT, C_IN, K, K)).astype(np.float32)
+        image   = stim_format.rand(-1, 1, (IMG, IMG, C_IN)).astype(np.float32)
+        filters = stim_format.rand(-1, 1, (N_OUT, C_IN, K, K)).astype(np.float32)
         patches, _ = _im2col_patches(image, K, STRIDE)
         A = np.stack(patches).astype(np.float32)
         B = np.zeros((P, P), dtype=np.float32)
