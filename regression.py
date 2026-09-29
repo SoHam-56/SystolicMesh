@@ -43,6 +43,7 @@ Usage
   python regression.py --matrix-size 16 --group conv
   python regression.py --matrix-size 16 --fast
   python regression.py --matrix-size 64
+  python regression.py --matrix-size 16 --format int8 --collapse-k 0
 
 Exit code: 0 = all pass, 1 = any failure or interrupted.
 """
@@ -60,7 +61,7 @@ from conv_tests import CONV_NUM_SETS, CONV_TESTS
 from matmul_tests import MATMUL_NUM_SETS, MATMUL_TESTS, pow2_tile_sizes
 import stim_format
 
-FORMATS = {"fp32": (8, 23), "bf16": (8, 7)}
+FORMATS = {"fp32": (8, 23), "bf16": (8, 7), "int8": (0, 7)}
 FMT, COLLAPSE = "fp32", 1  # set from --format and --collapse-k
 
 # ---------------------------------------------------------------------------
@@ -346,9 +347,8 @@ def _report(results: list, N: int, fast: bool, group: str) -> str:
     L.append("NOTES")
     L.append("-" * W)
     L.append("* TB patched once per (tile x group); make handles incremental compilation")
-    L.append("* Tolerance: RELATIVE <= 1%")
-    L.append("* Reference: float64 matmul cast to float32")
-    L.append("* Data type: IEEE-754 Float32")
+    L.append("* Compare: bit-exact against mesh_model (matmul in the float formats, matmul_int in int8)")
+    L.append(f"* Format: {FMT}  |  collapse-k {COLLAPSE}")
     L.append("* Tool: Verilator  |  Clock: 10 ns")
     L.append("=" * W)
 
@@ -391,7 +391,7 @@ def main() -> None:
     )
     parser.add_argument("--tiles", type=int, nargs="+", help="run only these tile sizes (default: every power-of-2 divisor)")
     parser.add_argument("--format", choices=sorted(FORMATS), default="fp32",
-                        help="number format of the build; narrow formats compare bit for bit")
+                        help="number format of the build; every format compares bit for bit against mesh_model")
     parser.add_argument("--collapse-k", type=int, choices=[0, 1], default=1,
                         help="1: full-depth arrays (the RTL default); 0: depth slices and the reduce tree")
     args = parser.parse_args()
