@@ -3,30 +3,31 @@
 // Output-stationary PE for the pipelined SystolicArray: one product per cycle, sets back to back with no gap.
 // Every K products form a pass; a set is one or more passes, accumulated into its own bank of U partial sums, which the reader combines.
 module ProcessingElement #(
-    parameter int EXP_W      = 8,   // the build's format: fp32 8/23, bf16 8/7
+    parameter int EXP_W      = 8,   // the build's format: fp32 8/23, bf16 8/7, int8 0/7
     parameter int MAN_W      = 23,
-    parameter int DATA_WIDTH = 1 + EXP_W + MAN_W,  // operands, products and sums
+    parameter int DATA_WIDTH = 1 + EXP_W + MAN_W,  // operands
+    parameter int ACC_W      = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // products and sums: int32 in int8, DATA_WIDTH in the float formats
     parameter int K          = 4,  // products per set
     parameter int BANKS      = 3,  // sets held at once: one accumulating, the older ones finishing or being read
     parameter int U          = (K < sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1) ? K : sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1,  // partial sums per set: the adder latency plus one
     parameter int BW         = (BANKS > 1) ? $clog2(BANKS) : 1
 ) (
-    input  logic                            clk_i,
-    input  logic                            rstn_i,
-    input  logic [                DATA_WIDTH-1:0] a_i,
-    input  logic [                DATA_WIDTH-1:0] b_i,
-    input  logic                            v_i,
-    input  logic                            fresh_i,     // with v_i: this pass starts a set, its first U products add to 0
-    input  logic                            more_i,      // with v_i: another pass of the same set follows this one
-    output logic [                DATA_WIDTH-1:0] a_o,
-    output logic [                DATA_WIDTH-1:0] b_o,
-    output logic                            v_o,
-    output logic                            fresh_o,
-    output logic                            more_o,
-    input  logic [                  BW-1:0] rd_bank_i,   // bank the reader looks at
-    output logic [U-1:0][DATA_WIDTH-1:0]    partial_o,   // that bank's partial sums
-    input  logic                            release_i,   // the reader is done with rd_bank_i
-    output logic [               BANKS-1:0] final_o      // per bank: a finished set, all adds written back
+    input  logic                         clk_i,
+    input  logic                         rstn_i,
+    input  logic [       DATA_WIDTH-1:0] a_i,
+    input  logic [       DATA_WIDTH-1:0] b_i,
+    input  logic                         v_i,
+    input  logic                         fresh_i,     // with v_i: this pass starts a set, its first U products add to 0
+    input  logic                         more_i,      // with v_i: another pass of the same set follows this one
+    output logic [       DATA_WIDTH-1:0] a_o,
+    output logic [       DATA_WIDTH-1:0] b_o,
+    output logic                         v_o,
+    output logic                         fresh_o,
+    output logic                         more_o,
+    input  logic [               BW-1:0] rd_bank_i,   // bank the reader looks at
+    output logic [U-1:0][     ACC_W-1:0] partial_o,   // that bank's partial sums
+    input  logic                         release_i,   // the reader is done with rd_bank_i
+    output logic [            BANKS-1:0] final_o      // per bank: a finished set, all adds written back
 );
   localparam int ADD_LAT = sienna_fmt_pkg::add_lat(EXP_W, MAN_W);  // valid_i at t, done_o at t+ADD_LAT
   localparam int MUL_LAT = sienna_fmt_pkg::mul_lat(EXP_W, MAN_W);  // valid_i at t, done_o at t+MUL_LAT
@@ -78,27 +79,36 @@ module ProcessingElement #(
   assign prod_fresh = fresh_d[MUL_LAT-1];
   assign prod_more  = more_d[MUL_LAT-1];
 
-  logic [DATA_WIDTH-1:0] prod, sum;
+  logic [ACC_W-1:0] prod, sum;
   logic prod_v, sum_v;
 
-  logic [DATA_WIDTH-1:0] acc[BANKS][U];
+  logic [ACC_W-1:0] acc[BANKS][U];
   logic [BW-1:0] cur;  // bank the next product joins
   logic [SW-1:0] slot;  // partial sum within it
   logic [CW-1:0] n_prod;  // products taken into cur
   logic [BANKS-1:0] taken;  // all K products of the bank issued, not yet released
 
   // The first product into a slot of a new set is added to zero, so a reused bank needs no clear; later passes add on.
-  logic [DATA_WIDTH-1:0] add_a;
+  logic [ACC_W-1:0] add_a;
   assign add_a = (prod_fresh && n_prod < CW'(U)) ? '0 : acc[cur][slot];
 
-  // The multiplier and adder in the build's format.
+  // The multiplier and adder in the build's format; int8 multiplies exactly into int16 and accumulates in int32, wrapping.
   if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
     $fatal(1, "ProcessingElement: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
+  end else if (ACC_W != sienna_fmt_pkg::acc_w(EXP_W, MAN_W)) begin : G_BAD_ACC_W
+    $fatal(1, "ProcessingElement: ACC_W=%0d is not sienna_fmt_pkg::acc_w(%0d, %0d)", ACC_W, EXP_W, MAN_W);
   end else if (sienna_fmt_pkg::is_fp32(EXP_W, MAN_W)) begin : G_FP32
     fp32Multiplier MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i), .A(a_i), .B(b_i), .result_o(prod), .done_o(prod_v),
                         .overflow_o(), .underflow_o(), .invalid_o());
     fp32Adder ADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(prod_v), .A(add_a), .B(prod), .result_o(sum), .done_o(sum_v),
                    .overflow_o(), .underflow_o(), .invalid_o());
+  end else if (sienna_fmt_pkg::is_int(EXP_W)) begin : G_INT
+    logic [2*DATA_WIDTH-1:0] prod_w;  // the full signed product
+    intMultiplier #(.W(DATA_WIDTH)) MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i), .A(a_i), .B(b_i), .result_o(prod_w),
+        .done_o(prod_v));
+    assign prod = {{(ACC_W - 2 * DATA_WIDTH){prod_w[2*DATA_WIDTH-1]}}, prod_w};  // sign-extended to the accumulator
+    intAdder #(.W(ACC_W)) ADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(prod_v), .A(add_a), .B(prod), .result_o(sum),
+        .done_o(sum_v));
   end else begin : G_FP
     fpMultiplier #(.EXP_W(EXP_W), .MAN_W(MAN_W)) MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i), .A(a_i), .B(b_i),
         .result_o(prod), .done_o(prod_v), .overflow_o(), .underflow_o(), .invalid_o());

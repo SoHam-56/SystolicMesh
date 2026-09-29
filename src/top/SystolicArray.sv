@@ -5,9 +5,10 @@
 module SystolicArray #(
     parameter int N           = 4,
     parameter int K           = N,  // depth of the product; N for a square tile
-    parameter int EXP_W       = 8,   // the build's format: fp32 8/23 by default, bf16 8/7
+    parameter int EXP_W       = 8,   // the build's format: fp32 8/23 by default, bf16 8/7, int8 0/7
     parameter int MAN_W       = 23,
-    parameter int DATA_WIDTH  = 1 + EXP_W + MAN_W,  // every word: operands and partial sums
+    parameter int DATA_WIDTH  = 1 + EXP_W + MAN_W,  // operands
+    parameter int ACC_W       = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // partial sums: int32 in int8, the format's width in floats
     parameter int WEST_WORDS  = K,  // A words per write: one row of A
     parameter int NORTH_WORDS = N,  // B words per write: one row of B
     parameter int BANKS       = 3,  // sets whose partials the PEs hold at once
@@ -29,7 +30,7 @@ module SystolicArray #(
     output logic                               next_final_o,   // so is the one after it, for a reader about to release
     input  logic                               read_enable_i,
     input  logic [          $clog2(N*N)-1:0]   read_addr_i,
-    output logic [U-1:0][DATA_WIDTH-1:0]       read_data_o,    // the pixel's U partial sums, one cycle later
+    output logic [U-1:0][ACC_W-1:0]            read_data_o,    // the pixel's U partial sums, one cycle later
     output logic                               read_valid_o,
     input  logic                               release_i,      // the reader is done with the oldest final set
     output logic                               busy_o          // a set is loaded, feeding or unread
@@ -166,7 +167,7 @@ module SystolicArray #(
   logic [DATA_WIDTH-1:0] a_w[N][N+1];  // a_w[r][c] enters PE(r,c) from the west
   logic [DATA_WIDTH-1:0] b_n[N+1][N];  // b_n[r][c] enters PE(r,c) from the north
   logic v_w[N][N+1], f_w[N][N+1], m_w[N][N+1];  // valid and pass flags travel east with A
-  logic [U-1:0][DATA_WIDTH-1:0] part[N][N];
+  logic [U-1:0][ACC_W-1:0] part[N][N];
   logic [BANKS-1:0] pe_final[N*N];
   logic [BW-1:0] rb;  // oldest unread accumulator bank
 
@@ -184,6 +185,7 @@ module SystolicArray #(
           .EXP_W     (EXP_W),
           .MAN_W     (MAN_W),
           .DATA_WIDTH(DATA_WIDTH),
+          .ACC_W     (ACC_W),
           .K         (K),
           .BANKS     (BANKS),
           .U         (U),

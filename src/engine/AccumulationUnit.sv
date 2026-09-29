@@ -6,9 +6,9 @@
 module AccumulationUnit #(
     parameter P = 8,
     parameter N = 4,
-    parameter EXP_W = 8,  // the build's format: fp32 8/23, bf16 8/7
+    parameter EXP_W = 8,  // the build's format: fp32 8/23, bf16 8/7, int8 0/7
     parameter MAN_W = 23,
-    parameter DATA_WIDTH = 1 + EXP_W + MAN_W,
+    parameter ACC_W = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // partials, bias and results: int32 in int8, the format's width in floats
     parameter MATRIX_WIDTH = 32,
     parameter TILE_ROW_OFFSET = 0,
     parameter TILE_COL_OFFSET = 0,
@@ -19,16 +19,16 @@ module AccumulationUnit #(
     input logic rstn_i,
     input logic start_i,  // read the arrays' oldest final set now
     input logic [RBW-1:0] out_bank_i,  // result bank this set is written to
-    input logic [P-1:0][DATA_WIDTH-1:0] tile_data_i,
-    input logic [N-1:0][DATA_WIDTH-1:0] bias_i,  // at start: the set's bias for this tile's N columns, zero for none
-    output logic [DATA_WIDTH-1:0] bias_word_o,  // bias of the pixel read last cycle, one of the P inputs
+    input logic [P-1:0][ACC_W-1:0] tile_data_i,
+    input logic [N-1:0][ACC_W-1:0] bias_i,  // at start: the set's bias for this tile's N columns, zero for none
+    output logic [ACC_W-1:0] bias_word_o,  // bias of the pixel read last cycle, one of the P inputs
     output logic rd_en_o,
     output logic [$clog2(N*N)-1:0] rd_addr_o,
     output logic read_done_o,  // one cycle: the last pixel was read, the arrays may release the set
     output logic ready_o,  // not reading; a start is taken
     output logic write_en_o,
     output logic [31:0] write_addr_o,  // includes the result bank offset
-    output logic [DATA_WIDTH-1:0] write_data_o,
+    output logic [ACC_W-1:0] write_data_o,
     output logic written_o,  // one cycle: the last pixel of a set was written
     output logic busy_o  // reading, or pixels still in the tree
 );
@@ -38,6 +38,8 @@ module AccumulationUnit #(
 
   if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
     $fatal(1, "AccumulationUnit: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
+  end else if (ACC_W != sienna_fmt_pkg::acc_w(EXP_W, MAN_W)) begin : G_BAD_ACC_W
+    $fatal(1, "AccumulationUnit: ACC_W=%0d is not sienna_fmt_pkg::acc_w(%0d, %0d)", ACC_W, EXP_W, MAN_W);
   end
   localparam int LEVELS = $clog2(P);  // adder levels; 0 when there is one partial
   localparam int LAT = 1 + LEVELS * ADD_LAT;  // read issue to tree output
@@ -51,7 +53,7 @@ module AccumulationUnit #(
   logic reading;
   logic [PW-1:0] rd_idx;
   logic [RBW-1:0] rd_bank;
-  logic [N-1:0][DATA_WIDTH-1:0] rd_bias;
+  logic [N-1:0][ACC_W-1:0] rd_bias;
 
   assign ready_o   = !reading || read_done_o;  // the next set may start as the last pixel is read
   assign rd_en_o   = reading;
@@ -104,7 +106,7 @@ module AccumulationUnit #(
   end
 
   // A read issued at cycle t presents its data at t+1, so level 0 is valid one cycle behind.
-  logic [DATA_WIDTH-1:0] lvl_d[LEVELS+1][P];
+  logic [ACC_W-1:0] lvl_d[LEVELS+1][P];
   logic                  lvl_v[LEVELS+1];
   assign lvl_v[0] = tag_v[0];
   for (genvar k = 0; k < P; k++) begin : L0
@@ -120,6 +122,9 @@ module AccumulationUnit #(
         if (sienna_fmt_pkg::is_fp32(EXP_W, MAN_W)) begin : G_FP32
           fp32Adder adder (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(lvl_v[l]), .A(lvl_d[l][2*m]), .B(lvl_d[l][2*m+1]),
                            .result_o(lvl_d[l+1][m]), .done_o(done_bits[m]), .overflow_o(), .underflow_o(), .invalid_o());
+        end else if (sienna_fmt_pkg::is_int(EXP_W)) begin : G_INT
+          intAdder #(.W(ACC_W)) adder (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(lvl_v[l]), .A(lvl_d[l][2*m]), .B(lvl_d[l][2*m+1]),
+                                       .result_o(lvl_d[l+1][m]), .done_o(done_bits[m]));
         end else begin : G_FP
           fpAdder #(.EXP_W(EXP_W), .MAN_W(MAN_W)) adder (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(lvl_v[l]),
               .A(lvl_d[l][2*m]), .B(lvl_d[l][2*m+1]), .result_o(lvl_d[l+1][m]), .done_o(done_bits[m]),
@@ -127,7 +132,7 @@ module AccumulationUnit #(
         end
       end else begin : PASS
         // An odd entry out: delay it by the adder latency so it stays aligned with its level.
-        logic [DATA_WIDTH-1:0] dly[ADD_LAT];
+        logic [ACC_W-1:0] dly[ADD_LAT];
         logic                  vdly[ADD_LAT];
         always_ff @(posedge clk_i or negedge rstn_i) begin
           if (!rstn_i) begin
