@@ -276,6 +276,13 @@ def _run_group(
             )
             results.append(r)
             _print_result(r)
+            if "BUILDFAIL" in raw:  # the next test would rebuild the same config and fail the same way
+                for rest in tests[idx + 1:]:
+                    results.append(dict(name=rest["name"], group=rest.get("group", ""), tile=tile, N=N, wall=0.0,
+                                        log=log_name, status="NO-RUN", passed=0, failed=0, elements=0, tol=0,
+                                        fail_els=0, avg_cyc=0))
+                print(wrn(f"  ║  build failed at T={tile}: {len(tests) - idx - 1} remaining tests not run"))
+                break
 
     finally:
         # Restore after the whole group so we don't touch the TB mid-group
@@ -382,6 +389,7 @@ def main() -> None:
         action="store_true",
         help="One tile size only (middle power-of-2 divisor of N)",
     )
+    parser.add_argument("--tiles", type=int, nargs="+", help="run only these tile sizes (default: every power-of-2 divisor)")
     parser.add_argument("--format", choices=sorted(FORMATS), default="fp32",
                         help="number format of the build; narrow formats compare bit for bit")
     parser.add_argument("--collapse-k", type=int, choices=[0, 1], default=1,
@@ -412,6 +420,12 @@ def main() -> None:
     # ── Tile list ─────────────────────────────────────────────────────────
     all_tiles = pow2_tile_sizes(N)
     tiles = [all_tiles[len(all_tiles) // 2]] if args.fast else all_tiles
+    if args.tiles:
+        bad = [x for x in args.tiles if x not in all_tiles]
+        if bad:
+            print(err(f"[ERROR] --tiles {bad}: valid tile sizes for N={N} are {all_tiles}"))
+            sys.exit(1)
+        tiles = [x for x in all_tiles if x in args.tiles]
 
     # For conv, find the maximum NUM_TEST_SETS needed across all conv tests.
     # We compute this once here so it's stable for the whole run.
