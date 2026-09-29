@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""The mesh stimulus's number format. fp32 writes float32 words and a float64 reference exactly as before; bf16 writes bf16
-words and the bit-exact expected result from mesh_model, for the TB's exact compare."""
+"""The mesh stimulus's number format: operand words in the format and the bit-exact expected result from mesh_model in every
+format (fp32 included), for the TB's exact compare."""
 import os
 import struct
 
@@ -51,15 +51,15 @@ def write_set(A, B, stim_dir, suffix=""):
     assert A.shape[1] == N and A.shape[0] <= N and B.shape[0] <= N, f"unsupported set shapes {A.shape} and {B.shape}"
     A = np.vstack([A, np.zeros((N - A.shape[0], N), dtype=np.float32)]).astype(np.float32)
     B = np.vstack([B, np.zeros((N - B.shape[0], N), dtype=np.float32)]).astype(np.float32)
-    if FORMAT == "fp32":
-        C = (A.astype(np.float64) @ B.astype(np.float64)).astype(np.float32)
-        for name, M in (("A", A), ("B", B), ("C", C)):
+    Ab, Bb = to_bits(A), to_bits(B)
+    Cb = mesh_model.matmul(fpu.FORMATS[FORMAT], [(Ab, Bb)], N, TILE, COLLAPSE_K)
+    if FORMAT == "fp32":  # operands as their float32 words, exactly as before; C is the mesh's own bit-exact result
+        for name, M in (("A", A), ("B", B)):
             with open(os.path.join(stim_dir, f"matrix{name}{suffix}.mem"), "w") as fh:
                 for v in np.asarray(M).flatten():
                     fh.write(_f2h(v) + "\n")
-        return C
-    Ab, Bb = to_bits(A), to_bits(B)
-    Cb = mesh_model.matmul(fpu.FORMATS[FORMAT], [(Ab, Bb)], N, TILE, COLLAPSE_K)
+        _write_words(os.path.join(stim_dir, f"matrixC{suffix}.mem"), Cb)
+        return to_float(Cb)
     for name, M in (("A", Ab), ("B", Bb), ("C", Cb)):
         _write_words(os.path.join(stim_dir, f"matrix{name}{suffix}.mem"), M)
     return to_float(Cb)

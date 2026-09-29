@@ -21,11 +21,7 @@ module TB_SystolicMesh;
   // A matmul is ~120 cycles at N=16; 500k made every hung set a 20-minute wait.
   localparam int TIMEOUT_CYCLES = 20_000;
 
-  // Tolerance Settings
-  localparam TOLERANCE_MODE = "RELATIVE";  // "ABSOLUTE", "RELATIVE", or "BOTH"
-  localparam real ABS_TOL = 0.001;  // Max absolute difference allowed
-  localparam real REL_TOL = 0.01;  // Max relative difference allowed (1%)
-  localparam logic ENABLE_TOL = (EXP_W == 8 && MAN_W == 23);  // fp32 tolerance; narrow formats compare bit for bit
+  // Every format compares bit for bit: the expected results come from mesh_model, the hardware's own arithmetic.
 
   reg clk, rstn, start_mult;
 
@@ -47,7 +43,6 @@ module TB_SystolicMesh;
   int                      sets_passed = 0;
   int                      sets_failed = 0;
   int                      total_elements = 0;
-  int                      tol_pass_elements = 0;
 
   // ── Cycle-count tracking ───────────────────────────────────────────────────
   // Hardware cycle counter: counts from start pulse until complete asserts.
@@ -132,68 +127,6 @@ module TB_SystolicMesh;
   initial begin
     clk = 0;
     forever #(CLK_PERIOD / 2) clk = ~clk;
-  end
-
-  // Manual binary32 decode; $signed() leaves the bit pattern as an integer.
-  function automatic real f32(input logic [31:0] b);
-    int  e;
-    real m, v;
-    e = int'(b[30:23]);
-    m = real'(longint'(b[22:0])) / 8388608.0;
-    if (e == 255) v = 1.0e38;                         // Inf / NaN, clamped so any finite compare fails
-    else if (e == 0) v = 0.0;                         // zero / flushed subnormal
-    else v = (1.0 + m) * (2.0 ** (e - 127));
-    return b[31] ? -v : v;
-  endfunction
-
-  // ── Tolerance check ───────────────────────────────────────────────────────
-  function automatic logic check_tolerance(
-      input [DATA_WIDTH-1:0] expected, input [DATA_WIDTH-1:0] actual, output string tolerance_info);
-    real expected_real, actual_real;
-    real abs_diff, rel_diff;
-    logic abs_ok, rel_ok, result;
-
-    expected_real = f32(expected);
-    actual_real = f32(actual);
-
-    abs_diff = (expected_real > actual_real) ?
-               (expected_real - actual_real) : (actual_real - expected_real);
-
-    if (expected_real != 0.0)
-      rel_diff = abs_diff / ((expected_real > 0) ? expected_real : -expected_real);
-    else rel_diff = (actual_real == 0.0) ? 0.0 : 1.0;
-
-    abs_ok = (abs_diff <= ABS_TOL);
-    rel_ok = (rel_diff <= REL_TOL);
-
-    case (TOLERANCE_MODE)
-      "ABSOLUTE": result = abs_ok;
-      "RELATIVE": result = rel_ok;
-      "BOTH":     result = abs_ok && rel_ok;
-      default:    result = abs_ok;
-    endcase
-
-    tolerance_info = $sformatf(
-        "Abs=%.4f (Limit %.4f), Rel=%.4f%% (Limit %.2f%%)",
-        abs_diff,
-        ABS_TOL,
-        rel_diff * 100.0,
-        REL_TOL * 100.0
-    );
-    return result;
-  endfunction
-
-  // Checker self-test: a loose or broken compare must fail the run before any result is trusted.
-  initial begin
-    string st_info;
-    if (ENABLE_TOL && (!check_tolerance(32'h3f800000, 32'h3f800003, st_info) ||   // 1.0 vs 1.0 + 3 ulp: pass
-        check_tolerance(32'h3f800000, 32'h40000000, st_info) ||    // 1.0 vs 2.0: fail
-        check_tolerance(32'h3f800000, 32'h3f7ae148, st_info) ||    // 1.0 vs 0.98: fail
-        check_tolerance(32'h3f800000, 32'hbf800000, st_info) ||    // 1.0 vs -1.0: fail
-        check_tolerance(32'hbf000000, 32'hbd4ccccd, st_info))) begin // -0.5 vs -0.05: fail
-      $display("[FAIL] Tolerance checker self-test failed; results cannot be trusted");
-      $finish;
-    end
   end
 
   // ── Reset ─────────────────────────────────────────────────────────────────
@@ -297,8 +230,6 @@ module TB_SystolicMesh;
   task verify_results(input string filename, output int err_count);
     integer fh, i, res;
     reg [DATA_WIDTH-1:0] exp_val, actual_val;
-    logic exact_match, tol_match;
-    string tol_info;
     begin
       $display("  [Verify] Checking against %s...", filename);
       fh = $fopen(filename, "r");
@@ -329,24 +260,8 @@ module TB_SystolicMesh;
         r_en = 0;
         total_elements++;
 
-        exact_match = (actual_val == expected_mem[i]);
-
-        if (!exact_match && ENABLE_TOL)
-          tol_match = check_tolerance(expected_mem[i], actual_val, tol_info);
-        else begin
-          tol_match = 0;
-          tol_info  = "N/A";
-        end
-
-        if (exact_match) begin
-          // Exact pass — silent
-        end else if (tol_match) begin
-          $display("    [PASS-TOL] Addr %0d: Exp=0x%h, Act=0x%h | %s", i, expected_mem[i],
-                   actual_val, tol_info);
-          tol_pass_elements++;
-        end else begin
+        if (actual_val !== expected_mem[i]) begin
           $display("    [FAIL]     Addr %0d: Exp=0x%h, Act=0x%h", i, expected_mem[i], actual_val);
-          if (ENABLE_TOL) $display("               %s", tol_info);
           err_count++;
         end
       end
@@ -620,19 +535,13 @@ module TB_SystolicMesh;
     $dumpvars(0, TB_SystolicMesh);
 
     $display("----------------------------------------------");
-    $display(" SYSTOLIC MESH VERIFICATION (TOLERANCE MODE)  ");
+    $display(" SYSTOLIC MESH VERIFICATION (BIT-EXACT)       ");
     $display("----------------------------------------------");
     $display(" Matrix Size:    %0d x %0d", MATRIX_SIZE, MATRIX_SIZE);
     $display(" Tile Size:      %0d x %0d", TILE_SIZE, TILE_SIZE);
     $display(" Tiles in mesh:  %0d x %0d", MATRIX_SIZE / TILE_SIZE, MATRIX_SIZE / TILE_SIZE);
     $display(" Sets to Run:    %0d", NUM_TEST_SETS);
-    $display(" Tolerance Mode: %s", TOLERANCE_MODE);
-    if (ENABLE_TOL) begin
-      $display(" Abs Tolerance:  %.4f", ABS_TOL);
-      $display(" Rel Tolerance:  %.2f%%", REL_TOL * 100.0);
-    end else begin
-      $display(" Tolerance:      DISABLED (Exact Match Only)");
-    end
+    $display(" Compare:        bit-exact against mesh_model");
     $display("----------------------------------------------");
 
     begin
@@ -653,12 +562,6 @@ module TB_SystolicMesh;
     $display(" Passed Sets:    %0d", sets_passed);
     $display(" Failed Sets:    %0d", sets_failed);
     $display(" Total Elements: %0d", total_elements);
-    if (ENABLE_TOL)
-      $display(
-          " Tol Passed Els: %0d (%.1f%%)",
-          tol_pass_elements,
-          (tol_pass_elements * 100.0) / (total_elements > 0 ? total_elements : 1)
-      );
 
     // Per-set cycle breakdown
     $display("----------------------------------------------");
