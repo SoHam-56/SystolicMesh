@@ -38,3 +38,22 @@ def matmul(f, passes, N, T, collapse_k=1, bias=None):
             nxt.append(level[-1])  # an odd entry out waits a level, as the RTL's PASS delay
         level = nxt
     return np.asarray(level[0], dtype=np.int64)
+
+
+def matmul_int(passes, N, bias=None):
+    """The int8 mesh: int8 x int8 products over a set's passes plus the bias, summed in wrapping int32; int8 values in, int64 out."""
+    acc = np.zeros((N, N), dtype=np.int64)
+    for A, B in passes:
+        A = np.asarray(A, dtype=np.int64)
+        B = np.asarray(B, dtype=np.int64)
+        if A.shape != (N, N) or B.shape != (N, N):
+            raise ValueError(f"mesh sets are N x N; got {A.shape} and {B.shape}")
+        if min(A.min(), B.min()) < -128 or max(A.max(), B.max()) > 127:
+            raise ValueError("int8 operands out of range: pass values in [-128, 127], not bit patterns")
+        acc += A @ B
+    if bias is not None:
+        b = np.asarray(bias, dtype=np.int64)
+        if b.shape != (N,) or b.min() < -2**31 or b.max() >= 2**31:
+            raise ValueError(f"bias must be {N} int32 values")
+        acc += b[None, :]
+    return ((acc + 2**31) % 2**32) - 2**31
