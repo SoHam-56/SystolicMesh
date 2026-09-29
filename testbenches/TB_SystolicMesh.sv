@@ -6,6 +6,7 @@ module TB_SystolicMesh;
   localparam int MAN_W = 23;
   localparam int COLLAPSE_K = 1;  // patched by regression.py --collapse-k
   localparam DATA_WIDTH = 1 + EXP_W + MAN_W;
+  localparam int ACC_W = sienna_fmt_pkg::acc_w(EXP_W, MAN_W);  // result words: int32 in int8, DATA_WIDTH in floats
   localparam CLK_PERIOD = 10;
 
   localparam MATRIX_SIZE = 16;
@@ -33,10 +34,12 @@ module TB_SystolicMesh;
 
   reg                      r_en;
   reg     [          31:0] r_addr;
-  wire    [DATA_WIDTH-1:0] r_data;
+  wire    [     ACC_W-1:0] r_data;
   wire                     r_valid;
 
-  reg     [DATA_WIDTH-1:0] expected_mem          [0:SRAM_SIZE-1];
+  reg     [     ACC_W-1:0] expected_mem          [0:SRAM_SIZE-1];
+  reg                              bias_v = 1'b0;  // the set's bias (int8: matrixBias<suffix>.mem), taken by the mesh with the start
+  reg [MATRIX_SIZE-1:0][ACC_W-1:0] bias_d = '0;
 
   // ── Verification counters ──────────────────────────────────────────────────
   int                      total_sets_run = 0;
@@ -83,14 +86,15 @@ module TB_SystolicMesh;
       .MAN_W      (MAN_W),
       .COLLAPSE_K (COLLAPSE_K),
       .DATA_WIDTH (DATA_WIDTH),
+      .ACC_W      (ACC_W),
       .HOST_WORDS (HOST_WORDS)
   ) dut (
       .clk_i(clk),
       .rstn_i(rstn),
       .start_matrix_mult_i(start_mult),
       .partial_i(1'b0),
-      .bias_valid_i(1'b0),
-      .bias_i('0),
+      .bias_valid_i(bias_v),
+      .bias_i(bias_d),
       .weight_cached_i(1'b0),
       .weight_tile_i('0),
       .wc_write_enable_i(1'b0),
@@ -229,7 +233,7 @@ module TB_SystolicMesh;
   // ── Result verification ───────────────────────────────────────────────────
   task verify_results(input string filename, output int err_count);
     integer fh, i, res;
-    reg [DATA_WIDTH-1:0] exp_val, actual_val;
+    reg [ACC_W-1:0] exp_val, actual_val;
     begin
       $display("  [Verify] Checking against %s...", filename);
       fh = $fopen(filename, "r");
@@ -284,6 +288,29 @@ module TB_SystolicMesh;
     end
   endtask
 
+  // ── Per-set bias: the mesh samples bias_i with the start; matrixBias<suffix>.mem exists only in int8 ────────
+  task automatic drive_bias(input int s);
+    string f;
+    integer fh, res;
+    reg [ACC_W-1:0] tmp;
+    f = (NUM_TEST_SETS == 1) ? "matrixBias.mem" : $sformatf("matrixBias_%0d.mem", s);
+    bias_d = '0;
+    bias_v = 1'b0;
+    fh = $fopen(f, "r");
+    if (fh) begin
+      for (int c = 0; c < MATRIX_SIZE; c++) begin
+        res = $fscanf(fh, "%h", tmp);
+        if (res != 1) begin
+          $display("  [Error] %s: fewer than %0d bias words", f, MATRIX_SIZE);
+          $finish;
+        end
+        bias_d[c] = tmp;
+      end
+      bias_v = 1'b1;
+      $fclose(fh);
+    end
+  endtask
+
   // ── Single test set ───────────────────────────────────────────────────────
   task execute_test_set(input int set_id);
     string f_a, f_b, f_c;
@@ -312,6 +339,7 @@ module TB_SystolicMesh;
       if (load_empty) $display("  [FAIL] Queue reads empty after load (west=%0b north=%0b)", w_empty, n_empty);
 
       $display("  [Action] Starting Matrix Mult...");
+      drive_bias(set_id);
       start_mult = 1;
       @(posedge clk);
       start_mult = 0;
@@ -394,6 +422,7 @@ module TB_SystolicMesh;
                 load_north_queue(f_b);
               join
               if (!in_ready) $display("  [FAIL] Start pulsed while input_ready_o is low");
+              drive_bias(s);
               start_mult = 1;
               @(posedge clk);
               start_mult = 0;
@@ -464,6 +493,7 @@ module TB_SystolicMesh;
             load_west_queue(f_a);
             load_north_queue(f_b);
           join
+          drive_bias(j % NUM_TEST_SETS);
           start_mult = 1;
           @(posedge clk);
           start_mult = 0;
@@ -476,6 +506,7 @@ module TB_SystolicMesh;
           load_west_queue(f_a);
           load_north_queue(f_b);
         join
+        drive_bias(MESH_SETS % NUM_TEST_SETS);
         start_mult = 1;
         @(posedge clk);
         start_mult = 0;
@@ -502,6 +533,7 @@ module TB_SystolicMesh;
           load_west_queue(f_a);
           load_north_queue(f_b);
         join
+        drive_bias(MESH_SETS % NUM_TEST_SETS);
         start_mult = 1;
         @(posedge clk);
         start_mult = 0;
@@ -541,6 +573,7 @@ module TB_SystolicMesh;
     $display(" Tile Size:      %0d x %0d", TILE_SIZE, TILE_SIZE);
     $display(" Tiles in mesh:  %0d x %0d", MATRIX_SIZE / TILE_SIZE, MATRIX_SIZE / TILE_SIZE);
     $display(" Sets to Run:    %0d", NUM_TEST_SETS);
+    $display(" Format:         EXP_W=%0d MAN_W=%0d, %0d-bit operands, %0d-bit results", EXP_W, MAN_W, DATA_WIDTH, ACC_W);
     $display(" Compare:        bit-exact against mesh_model");
     $display("----------------------------------------------");
 
