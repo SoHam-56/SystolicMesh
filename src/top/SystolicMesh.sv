@@ -512,6 +512,12 @@ module SystolicMesh #(
     if (!rstn_i) {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q} <= '0;
     else {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q} <=
              {start_accept, partial_i, last_partial, bias_valid_i, pack_shift_i, bq_n};
+  // A cache write's and a result read's terms, registered for the same reason: a host drives them at the edge too.
+  logic wcw_q, wcw_busy_q, rd_q, rd_full_q;
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) {wcw_q, wcw_busy_q, rd_q, rd_full_q} <= '0;
+    else {wcw_q, wcw_busy_q, rd_q, rd_full_q} <=
+             {wc_write_enable_i, wc_region_busy_o[wc_write_addr_i[WCAW-1]], read_enable_i, out_full[out_rd]};
   // Handshake invariants; live only with --assert.
   a_result_bank_free: assert property (@(posedge clk_i) disable iff (!rstn_i) reduce_start |-> out_state[out_wr] == R_FREE)
     else $error("SystolicMesh: a reduce started into a result bank that is not free");
@@ -525,14 +531,13 @@ module SystolicMesh #(
     else $error("SystolicMesh: a reduce started with no bias queued");
   a_wc_bus: assert property (@(posedge clk_i) disable iff (!rstn_i) !(wc_write_enable_i && north_write_enable_i))
     else $error("SystolicMesh: a cache write and a B write share the north bus in one cycle");
-  a_wc_region_free: assert property (@(posedge clk_i) disable iff (!rstn_i)
-                                     wc_write_enable_i |-> !wc_region_busy_o[wc_write_addr_i[WCAW-1]])
+  a_wc_region_free: assert property (@(posedge clk_i) disable iff (!rstn_i) wcw_q |-> !wcw_busy_q)
     else $error("SystolicMesh: cache write into a region a staged set still reads");
   a_staging_bank_full: assert property (@(posedge clk_i) disable iff (!rstn_i) bcast_release |-> in_full[in_rd])
     else $error("SystolicMesh: BROADCAST copied an empty staging bank");
   a_arrays_ready_on_launch: assert property (@(posedge clk_i) disable iff (!rstn_i) (load_we_A != '0) |-> arrays_load_ready)
     else $error("SystolicMesh: broadcast wrote an array whose operand bank was not free");
-  a_read_outstanding: assert property (@(posedge clk_i) disable iff (!rstn_i) read_enable_i |-> out_full[out_rd])
+  a_read_outstanding: assert property (@(posedge clk_i) disable iff (!rstn_i) rd_q |-> rd_full_q)
     else $error("SystolicMesh: result read with no result outstanding");
   a_wide_read_outstanding: assert property (@(posedge clk_i) disable iff (!rstn_i) wide_read_enable_i |-> out_full[out_rd])
     else $error("SystolicMesh: wide result read with no result outstanding");
