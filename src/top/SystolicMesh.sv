@@ -504,14 +504,22 @@ module SystolicMesh #(
   endgenerate
 
 `ifndef SYNTHESIS
+  // The accept's terms, registered: sampled assertion values miss a combinational start_accept when the host drives the start at the edge.
+  logic sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q;  // sa_last_partial_q: last_partial before this accept updated it
+  logic [2:0] sa_shift_q;
+  logic [$clog2(BIAS_Q):0] sa_bq_n_q;
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q} <= '0;
+    else {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q} <=
+             {start_accept, partial_i, last_partial, bias_valid_i, pack_shift_i, bq_n};
   // Handshake invariants; live only with --assert.
   a_result_bank_free: assert property (@(posedge clk_i) disable iff (!rstn_i) reduce_start |-> out_state[out_wr] == R_FREE)
     else $error("SystolicMesh: a reduce started into a result bank that is not free");
   a_written_in_order: assert property (@(posedge clk_i) disable iff (!rstn_i) set_done |-> out_state[wr_bank_done] == R_WRITING)
     else $error("SystolicMesh: a set finished writing into a bank that was not being written");
-  a_bias_first_pass: assert property (@(posedge clk_i) disable iff (!rstn_i) (start_accept && last_partial) |-> !bias_valid_i)
+  a_bias_first_pass: assert property (@(posedge clk_i) disable iff (!rstn_i) (sa_q && sa_last_partial_q) |-> !sa_bias_v_q)
     else $error("SystolicMesh: a bias came with a later pass of a sum; it belongs with the first");
-  a_bias_queue_room: assert property (@(posedge clk_i) disable iff (!rstn_i) bias_push |-> bq_n < BIAS_Q)
+  a_bias_queue_room: assert property (@(posedge clk_i) disable iff (!rstn_i) (sa_q && !sa_last_partial_q) |-> sa_bq_n_q < BIAS_Q)
     else $error("SystolicMesh: bias queue overflow");
   a_bias_queue_held: assert property (@(posedge clk_i) disable iff (!rstn_i) reduce_start |-> bq_n != 0)
     else $error("SystolicMesh: a reduce started with no bias queued");
@@ -528,12 +536,12 @@ module SystolicMesh #(
     else $error("SystolicMesh: result read with no result outstanding");
   a_wide_read_outstanding: assert property (@(posedge clk_i) disable iff (!rstn_i) wide_read_enable_i |-> out_full[out_rd])
     else $error("SystolicMesh: wide result read with no result outstanding");
-  a_pack_range: assert property (@(posedge clk_i) disable iff (!rstn_i) start_accept |-> int'(pack_shift_i) < $clog2(MATRIX_SIZE))
-    else $error("SystolicMesh: pack shift %0d leaves blocks narrower than 2 of N=%0d", pack_shift_i, MATRIX_SIZE);
-  a_pack_collapsed: assert property (@(posedge clk_i) disable iff (!rstn_i) (start_accept && pack_shift_i != 0) |-> COLLAPSE_K != 0)
+  a_pack_range: assert property (@(posedge clk_i) disable iff (!rstn_i) sa_q |-> int'(sa_shift_q) < $clog2(MATRIX_SIZE))
+    else $error("SystolicMesh: pack shift %0d leaves blocks narrower than 2 of N=%0d", sa_shift_q, MATRIX_SIZE);
+  a_pack_collapsed: assert property (@(posedge clk_i) disable iff (!rstn_i) (sa_q && sa_shift_q != 0) |-> COLLAPSE_K != 0)
     else $error("SystolicMesh: a packed set on the collapse-k 0 mesh");
   a_pack_one_pass: assert property (@(posedge clk_i) disable iff (!rstn_i)
-                                    (start_accept && pack_shift_i != 0) |-> (!partial_i && !last_partial))
+                                    (sa_q && sa_shift_q != 0) |-> (!sa_partial_q && !sa_last_partial_q))
     else $error("SystolicMesh: a packed set is part of an accumulated sum");
   a_wide_packed: assert property (@(posedge clk_i) disable iff (!rstn_i)
                                   (wide_read_enable_i && wide_read_packed_i) |-> (WIDE_READ % MATRIX_SIZE == 0))
