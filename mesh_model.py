@@ -30,14 +30,37 @@ def matmul(f, passes, N, T, collapse_k=1, bias=None):
                 b = np.broadcast_to(B[k, :][None, :], (N, N))
                 acc[rp, u] = fpu.add(f, acc[rp, u], fpu.mul(f, a, b)[0])[0]
             g += 1
+    return _reduce(f, [acc[rp, u] for rp in range(RP) for u in range(U)], N, bias)
+
+
+def _reduce(f, parts, N, bias):
+    """The reducer: a pairwise tree over the partials with the bias as its last input; an odd entry waits a level."""
     bias_row = np.zeros(N, dtype=np.int64) if bias is None else np.asarray(bias, dtype=np.int64)
-    level = [acc[rp, u] for rp in range(RP) for u in range(U)] + [np.broadcast_to(bias_row[None, :], (N, N))]
+    level = list(parts) + [np.broadcast_to(bias_row[None, :], (N, N))]
     while len(level) > 1:
         nxt = [fpu.add(f, level[2 * m], level[2 * m + 1])[0] for m in range(len(level) // 2)]
         if len(level) % 2:
             nxt.append(level[-1])  # an odd entry out waits a level, as the RTL's PASS delay
         level = nxt
     return np.asarray(level[0], dtype=np.int64)
+
+
+def matmul_packed(f, A, B, N, shift, bias=None):
+    """A packed set on the collapse-k mesh (one pass): PE (i, j) adds only products k in column j's block of b = N >> shift,
+    the r-th of them into slot r mod U, so each block sums exactly as its job alone; unwritten slots stay +0."""
+    A = np.asarray(A, dtype=np.int64)
+    B = np.asarray(B, dtype=np.int64)
+    b = N >> shift
+    U = min(N, ADD_LAT + 1)
+    acc = np.zeros((U, N, N), dtype=np.int64)
+    for c in range(N // b):
+        cols = slice(c * b, (c + 1) * b)
+        for r in range(b):
+            k = c * b + r
+            a = np.broadcast_to(A[:, k][:, None], (N, b))
+            w = np.broadcast_to(B[k, cols][None, :], (N, b))
+            acc[r % U][:, cols] = fpu.add(f, acc[r % U][:, cols], fpu.mul(f, a, w)[0])[0]
+    return _reduce(f, [acc[u] for u in range(U)], N, bias)
 
 
 def matmul_int(passes, N, bias=None):
