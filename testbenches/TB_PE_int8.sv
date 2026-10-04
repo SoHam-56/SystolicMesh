@@ -19,8 +19,8 @@ module TB_PE_int8;
   ProcessingElement #(
       .EXP_W(EXP_W), .MAN_W(MAN_W), .DATA_WIDTH(DW), .ACC_W(ACC_W), .K(K), .BANKS(BANKS), .U(U), .BW(BW)
   ) dut (
-      .clk_i(clk), .rstn_i(rstn), .a_i(a), .b_i(b), .v_i(v), .fresh_i(fresh), .more_i(more),
-      .a_o(), .b_o(), .v_o(), .fresh_o(), .more_o(),
+      .clk_i(clk), .rstn_i(rstn), .a_i(a), .b_i(b), .v_i(v), .fresh_i(fresh), .more_i(more), .pack_i(3'b0),
+      .a_o(), .b_o(), .v_o(), .fresh_o(), .more_o(), .pack_o(),
       .rd_bank_i(rd_bank), .partial_o(partial), .release_i(rel), .final_o(fin)
   );
 
