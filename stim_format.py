@@ -82,8 +82,7 @@ def _f2h(v) -> str:
 
 
 def write_set(A, B, stim_dir, suffix="", bias=None, pack=0):
-    """Write matrixA/B/C<suffix>.mem for one set; returns C as floats (int8: as int64 values, with bias, also in matrixBias<suffix>.mem).
-    pack != 0: a packed set (b = N >> pack columns per job), packShift<suffix>.mem holds the shift and C sums each block alone."""
+    """Writes one set's matrixA/B/C<suffix>.mem (int8 adds matrixBias; pack != 0 packShift, C per block alone); returns C (int8: int64)."""
     N = B.shape[1]
     # A set shorter than N x N is written with its zero rows: the staging bank is not reset, so the test must not rely on it.
     assert A.shape[1] == N and A.shape[0] <= N and B.shape[0] <= N, f"unsupported set shapes {A.shape} and {B.shape}"

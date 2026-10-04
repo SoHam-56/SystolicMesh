@@ -46,8 +46,7 @@ def _reduce(f, parts, N, bias):
 
 
 def matmul_packed(f, A, B, N, shift, bias=None):
-    """A packed set on the collapse-k mesh (one pass): PE (i, j) adds only products k in column j's block of b = N >> shift,
-    the r-th of them into slot r mod U, so each block sums exactly as its job alone; unwritten slots stay +0."""
+    """A packed collapse-k set: PE (i, j) adds only its block's products k (b = N >> shift), the r-th into slot r mod U, unwritten slots +0."""
     A = np.asarray(A, dtype=np.int64)
     B = np.asarray(B, dtype=np.int64)
     b = N >> shift
