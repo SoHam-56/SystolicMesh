@@ -162,6 +162,8 @@ def _make() -> tuple:
 
 
 def _parse(raw: str) -> dict:
+    if "Assertion failed" in raw:  # a firing assertion leaves the exit code and the TB's counts untouched
+        return dict(status="ASSERT", passed=0, failed=0, elements=0, tol=0, fail_els=0, avg_cyc=0)
     if "BUILDFAIL" in raw or "version `GLIBC" in raw or "%Error" in raw:
         return dict(status="NO-RUN", passed=0, failed=0, elements=0, tol=0,
                     fail_els=0, avg_cyc=0)
