@@ -81,16 +81,25 @@ def _f2h(v) -> str:
     return "".join(f"{b:02x}" for b in struct.pack(">f", float(v)))
 
 
-def write_set(A, B, stim_dir, suffix="", bias=None):
-    """Write matrixA/B/C<suffix>.mem for one set; returns C as floats (int8: as int64 values, with bias, also in matrixBias<suffix>.mem)."""
+def write_set(A, B, stim_dir, suffix="", bias=None, pack=0):
+    """Write matrixA/B/C<suffix>.mem for one set; returns C as floats (int8: as int64 values, with bias, also in matrixBias<suffix>.mem).
+    pack != 0: a packed set (b = N >> pack columns per job), packShift<suffix>.mem holds the shift and C sums each block alone."""
     N = B.shape[1]
     # A set shorter than N x N is written with its zero rows: the staging bank is not reset, so the test must not rely on it.
     assert A.shape[1] == N and A.shape[0] <= N and B.shape[0] <= N, f"unsupported set shapes {A.shape} and {B.shape}"
     A = np.vstack([A, np.zeros((N - A.shape[0], N), dtype=np.float32)]).astype(np.float32)
     B = np.vstack([B, np.zeros((N - B.shape[0], N), dtype=np.float32)]).astype(np.float32)
+    pf = os.path.join(stim_dir, f"packShift{suffix}.mem")
+    if pack:
+        with open(pf, "w") as fh:
+            fh.write(f"{int(pack):x}\n")
+    elif os.path.exists(pf):
+        os.remove(pf)  # a stale shift would pack this set
     if is_int():
         Ai, Bi = to_int(A), to_int(B)
-        Ci = mesh_model.matmul_int([(Ai, Bi)], N, bias)
+        b = N >> pack
+        Bm = Bi * np.kron(np.eye(N // b, dtype=np.int64), np.ones((b, b), np.int64)) if pack else Bi  # the skip ignores off-block weights
+        Ci = mesh_model.matmul_int([(Ai, Bm)], N, bias)
         _write_words(os.path.join(stim_dir, f"matrixA{suffix}.mem"), Ai & 0xFF)
         _write_words(os.path.join(stim_dir, f"matrixB{suffix}.mem"), Bi & 0xFF)
         _write_words(os.path.join(stim_dir, f"matrixC{suffix}.mem"), Ci & 0xFFFFFFFF, result_digits())
@@ -101,7 +110,8 @@ def write_set(A, B, stim_dir, suffix="", bias=None):
     if bias is not None:
         raise ValueError("a mesh bias file is written in int8 only")
     Ab, Bb = to_bits(A), to_bits(B)
-    Cb = mesh_model.matmul(fpu.FORMATS[FORMAT], [(Ab, Bb)], N, TILE, COLLAPSE_K)
+    f = fpu.FORMATS[FORMAT]
+    Cb = mesh_model.matmul_packed(f, Ab, Bb, N, pack) if pack else mesh_model.matmul(f, [(Ab, Bb)], N, TILE, COLLAPSE_K)
     if FORMAT == "fp32":  # operands as their float32 words, exactly as before; C is the mesh's own bit-exact result
         for name, M in (("A", A), ("B", B)):
             with open(os.path.join(stim_dir, f"matrix{name}{suffix}.mem"), "w") as fh:

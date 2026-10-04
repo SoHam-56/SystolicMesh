@@ -40,6 +40,7 @@ module TB_SystolicMesh;
   reg     [     ACC_W-1:0] expected_mem          [0:SRAM_SIZE-1];
   reg                              bias_v = 1'b0;  // the set's bias (int8: matrixBias<suffix>.mem), taken by the mesh with the start
   reg [MATRIX_SIZE-1:0][ACC_W-1:0] bias_d = '0;
+  reg [2:0] pack_d = '0;  // the set's pack shift (packShift<suffix>.mem), taken with the start
 
   // ── Verification counters ──────────────────────────────────────────────────
   int                      total_sets_run = 0;
@@ -95,6 +96,7 @@ module TB_SystolicMesh;
       .partial_i(1'b0),
       .bias_valid_i(bias_v),
       .bias_i(bias_d),
+      .pack_shift_i(pack_d),
       .weight_cached_i(1'b0),
       .weight_tile_i('0),
       .wc_write_enable_i(1'b0),
@@ -122,6 +124,7 @@ module TB_SystolicMesh;
       .read_data_o  (r_data),
       .read_valid_o (r_valid),
       .wide_read_enable_i(1'b0),
+      .wide_read_packed_i(1'b0),
       .wide_read_index_i ('0),
       .wide_read_data_o  (),
       .wide_read_valid_o ()
@@ -311,6 +314,21 @@ module TB_SystolicMesh;
     end
   endtask
 
+  // ── Per-set pack shift: packShift<suffix>.mem exists only for packed sets ─────────────────────────────────
+  task automatic drive_pack(input int s);
+    string f;
+    integer fh, res;
+    reg [31:0] tmp;
+    f = (NUM_TEST_SETS == 1) ? "packShift.mem" : $sformatf("packShift_%0d.mem", s);
+    pack_d = '0;
+    fh = $fopen(f, "r");
+    if (fh) begin
+      res = $fscanf(fh, "%h", tmp);
+      pack_d = tmp[2:0];
+      $fclose(fh);
+    end
+  endtask
+
   // ── Single test set ───────────────────────────────────────────────────────
   task execute_test_set(input int set_id);
     string f_a, f_b, f_c;
@@ -340,6 +358,7 @@ module TB_SystolicMesh;
 
       $display("  [Action] Starting Matrix Mult...");
       drive_bias(set_id);
+      drive_pack(set_id);
       start_mult = 1;
       @(posedge clk);
       start_mult = 0;
@@ -423,6 +442,7 @@ module TB_SystolicMesh;
               join
               if (!in_ready) $display("  [FAIL] Start pulsed while input_ready_o is low");
               drive_bias(s);
+              drive_pack(s);
               start_mult = 1;
               @(posedge clk);
               start_mult = 0;
@@ -494,6 +514,7 @@ module TB_SystolicMesh;
             load_north_queue(f_b);
           join
           drive_bias(j % NUM_TEST_SETS);
+          drive_pack(j % NUM_TEST_SETS);
           start_mult = 1;
           @(posedge clk);
           start_mult = 0;
@@ -507,6 +528,7 @@ module TB_SystolicMesh;
           load_north_queue(f_b);
         join
         drive_bias(MESH_SETS % NUM_TEST_SETS);
+        drive_pack(MESH_SETS % NUM_TEST_SETS);
         start_mult = 1;
         @(posedge clk);
         start_mult = 0;
@@ -534,6 +556,7 @@ module TB_SystolicMesh;
           load_north_queue(f_b);
         join
         drive_bias(MESH_SETS % NUM_TEST_SETS);
+        drive_pack(MESH_SETS % NUM_TEST_SETS);
         start_mult = 1;
         @(posedge clk);
         start_mult = 0;

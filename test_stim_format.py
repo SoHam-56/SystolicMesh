@@ -139,6 +139,23 @@ def test_int8_check_widths():
             raise AssertionError(f"check_widths took '{word}' in {name}")
 
 
+def test_pack_shift_file_and_off_block_weights():
+    # a packed write makes packShift<suffix>.mem and ignores off-block weights; an unpacked write removes the file
+    N = 8
+    for fmt in ("fp32", "int8"):
+        sf.configure(fmt, 4, 1)
+        A = sf.rand(-1, 1, (N, N)).astype(np.float32)
+        B = sf.rand(-1, 1, (N, N)).astype(np.float32)
+        Bz = np.where(np.kron(np.eye(2), np.ones((4, 4))).astype(bool), B, np.float32(0.0))  # shift 1: b = 4
+        with tempfile.TemporaryDirectory() as d:
+            pf = os.path.join(d, "packShift_1.mem")
+            C = sf.write_set(A, B, d, "_1", None, 1)
+            assert open(pf).read().split() == ["1"]
+            assert (C == sf.write_set(A, Bz, d, "_1", None, 1)).all(), f"{fmt}: off-block weights reached C"
+            sf.write_set(A, B, d, "_1")
+            assert not os.path.exists(pf), "a stale packShift would pack the next set"
+
+
 def test_rand():
     # int8 draws the whole range (4096 draws: missing -128 or 127 has probability about 2e-7); floats draw exactly as before
     sf.configure("int8", 4, 1)

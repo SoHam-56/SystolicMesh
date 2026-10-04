@@ -38,6 +38,7 @@ module TB_SystolicArray #(
       .commit_i            (commit),
       .commit_fresh_i      (1'b1),
       .commit_more_i       (1'b0),
+      .commit_pack_i       (3'b0),
       .load_ready_o        (load_ready),
       .set_final_o         (set_final),
       .next_final_o        (),

@@ -102,6 +102,7 @@ verilator:
 	@echo "-- Compiling Verilator simulation"
 	make -C $(VERILATOR_DIR) -f V$(TOP_MODULE).mk
 	@echo "-- Copying test files"
+	@rm -f $(VERILATOR_DIR)/packShift*.mem  # the copy below only adds; a shift left by an earlier test would pack this one
 		@if ls $(TB_DIR)/stimulus/*.mem 1> /dev/null 2>&1; then \
 		cp $(TB_DIR)/stimulus/*.mem $(VERILATOR_DIR); \
 		fi

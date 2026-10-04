@@ -414,6 +414,7 @@ def main() -> None:
         run_mm, run_conv = [], conv_tests
     else:
         run_mm, run_conv = mm_tests, conv_tests
+    run_mm = [t for t in run_mm if COLLAPSE or not t.get("packed")]  # packing is collapse-k only (the mesh asserts it)
 
     # Conv tests use a general 3x3 layout when N is not a perfect square; see conv_tests._general_pair.
 

@@ -78,10 +78,38 @@ def _ref_matmul(A: np.ndarray, B: np.ndarray) -> np.ndarray:
 
 
 def _write_set(A: np.ndarray, B: np.ndarray,
-               stim_dir: str, suffix: str = "") -> None:
-    """Compute C = A @ B in the stimulus format and write its .mem files for one set (int8: with the set's bias)."""
+               stim_dir: str, suffix: str = "", pack: int = 0) -> None:
+    """Compute C = A @ B in the stimulus format and write its .mem files for one set (int8: with the set's bias; pack: a packed set)."""
     bias = stim_format.int8_bias(B.shape[1], suffix) if stim_format.is_int() else None
-    stim_format.write_set(A, B, stim_dir, suffix, bias)
+    stim_format.write_set(A, B, stim_dir, suffix, bias, pack)
+
+
+def _pack_shifts(N: int) -> list:
+    """Per set: packed, unpacked between packed sets, b = 2 (fewer columns than the PE's 6 slots), b = N / 4, packed again."""
+    lg = N.bit_length() - 1
+    return [1, 0, lg - 1, min(2, lg - 1), 1]
+
+
+def _packed_sets(stim_dir: str, N: int, garbage: bool, seed0: int) -> int:
+    for s, sh in enumerate(_pack_shifts(N)):
+        _seed(seed0 + s)
+        b = N >> sh
+        A = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
+        B = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
+        if sh and not garbage:
+            B = np.where(np.kron(np.eye(N // b), np.ones((b, b))).astype(bool), B, np.float32(0.0))
+        _write_set(A, B, stim_dir, f"_{s}", sh)
+    return MATMUL_NUM_SETS
+
+
+def gen_mm_packed(stim_dir: str, N: int) -> int:
+    """Block-diagonal B, a pack shift per set with an unpacked set between: every block sums exactly as its job alone."""
+    return _packed_sets(stim_dir, N, False, 7300)
+
+
+def gen_mm_packed_garbage(stim_dir: str, N: int) -> int:
+    """Packed sets whose off-block weights are random, not zero: the PEs must ignore them."""
+    return _packed_sets(stim_dir, N, True, 7400)
 
 
 def _pad_to(sets: list, target: int) -> list:
@@ -242,6 +270,9 @@ MATMUL_TESTS = [
     dict(name="mm_small_values", description="Values ±1e-6; int8 -1/0/1  (underflow stress)", gen_fn=gen_mm_small_values),
     dict(name="mm_alternating",  description="±1 checkerboard  (sign alternation in accum.)",  gen_fn=gen_mm_alternating),
     dict(name="mm_signed_zero",  description="Rows of +0 and -0  (sign of zero sums)",          gen_fn=gen_mm_signed_zero),
+    dict(name="mm_packed",       description="Packed sets, a shift per set  (block == job alone)", gen_fn=gen_mm_packed, packed=True),
+    dict(name="mm_packed_garbage", description="Packed sets, random off-block weights  (skipped)", gen_fn=gen_mm_packed_garbage,
+         packed=True),
 ]
 
 
