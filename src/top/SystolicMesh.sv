@@ -22,6 +22,7 @@ module SystolicMesh #(
     input logic partial_i,  // with the start: keep this set's sums in the PEs, the next set adds to them and is reduced
     input logic                                  bias_valid_i,  // with the start: add bias_i[c] to every element of column c
     input logic [MATRIX_SIZE-1:0][ACC_W-1:0]      bias_i,
+    input logic [2:0]                            pack_shift_i,  // with the start: a packed set, b = N >> pack_shift_i columns per job; 0 unpacked
     input logic                                  weight_cached_i,  // with the start: B is cache tile weight_tile_i, the host sends only A
     input logic [WCTW-1:0]                       weight_tile_i,
     input logic                                  wc_write_enable_i,  // cache write of north_write_data_i at word wc_write_addr_i
@@ -51,6 +52,7 @@ module SystolicMesh #(
     // Wide read: word k is element k * (N*N / WIDE_READ) + wide_read_index_i of the oldest result.
     input  logic                                 wide_read_enable_i,
     input  logic [                         31:0] wide_read_index_i,
+    input  logic                                 wide_read_packed_i,  // the oldest result is packed: word k is column k % N, rows (k / N) * stride + index
     output logic [WIDE_READ-1:0][     ACC_W-1:0] wide_read_data_o,
     output logic                                 wide_read_valid_o
 );
@@ -69,6 +71,7 @@ module SystolicMesh #(
   logic [1:0] in_fresh, in_more;  // per staging bank: the set starts a sum; the next set continues it
   logic last_partial;  // the previous accepted set continues into the next one
   logic [WCTW-1:0] in_tile[2];  // and from this tile
+  logic [2:0] in_pack[2];  // per staging bank: the set's pack shift
   logic [$clog2(GLOBAL_ELEMENTS):0] ptr_A, ptr_B;
 `ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
   initial if ((GLOBAL_ELEMENTS % HOST_WORDS) != 0) $error("SystolicMesh: HOST_WORDS (%0d) must divide %0d", HOST_WORDS, GLOBAL_ELEMENTS);
@@ -100,6 +103,8 @@ module SystolicMesh #(
       last_partial <= 1'b0;
       in_tile[0] <= '0;
       in_tile[1] <= '0;
+      in_pack[0] <= '0;
+      in_pack[1] <= '0;
     end else begin
       // A write in the start cycle is the set's last row and lands before the bank switches.
       if (west_wr_ok)
@@ -118,6 +123,7 @@ module SystolicMesh #(
         in_more[in_wr] <= partial_i;
         last_partial <= partial_i;
         in_tile[in_wr] <= weight_tile_i;
+        in_pack[in_wr] <= pack_shift_i;
         in_wr <= ~in_wr;
       end
       if (bcast_release) begin
@@ -163,6 +169,7 @@ module SystolicMesh #(
   logic arrays_busy;
   logic reducers_ready, reducers_busy, reducers_read_done, reducers_written;
   logic ctrl_load_en, commit_q, commit_fresh_q, commit_more_q, set_launch, reduce_start;
+  logic [2:0] commit_pack_q;
   integer load_idx;
 
   assign loading_done  = (load_idx >= TILE_SIZE - 1);  // one tile row per cycle
@@ -177,10 +184,12 @@ module SystolicMesh #(
       commit_q <= 1'b0;
       commit_fresh_q <= 1'b0;
       commit_more_q <= 1'b0;
+      commit_pack_q <= '0;
     end else begin
       commit_q <= bcast_release;  // lands with the last registered row write
       commit_fresh_q <= in_fresh[in_rd];
       commit_more_q <= in_more[in_rd];
+      commit_pack_q <= in_pack[in_rd];
       case (bstate)
         B_IDLE:
         if (set_launch) begin
@@ -340,7 +349,9 @@ module SystolicMesh #(
   logic [WIDE_READ-1:0][31:0] wide_addr;
   always_comb
     for (int k = 0; k < WIDE_READ; k++)
-      wide_addr[k] = int'(out_rd) * GLOBAL_ELEMENTS + k * WIDE_STRIDE + wide_read_index_i;
+      wide_addr[k] = int'(out_rd) * GLOBAL_ELEMENTS + (wide_read_packed_i
+                     ? ((k / MATRIX_SIZE) * WIDE_STRIDE + int'(wide_read_index_i)) * MATRIX_SIZE + k % MATRIX_SIZE
+                     : k * WIDE_STRIDE + int'(wide_read_index_i));
 
 `ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
   initial
@@ -460,7 +471,8 @@ module SystolicMesh #(
                 .WEST_WORDS(LW),
                 .NORTH_WORDS(LW),
                 .U(U),
-                .BANKS(ACC_BANKS)
+                .BANKS(ACC_BANKS),
+                .COL0(COLLAPSE_K ? j * TILE_SIZE : 0)
             ) tile (
                 .clk_i(clk_i),
                 .rstn_i(rstn_i),
@@ -471,6 +483,7 @@ module SystolicMesh #(
                 .commit_i(commit_q),
                 .commit_fresh_i(commit_fresh_q),
                 .commit_more_i(commit_more_q),
+                .commit_pack_i(commit_pack_q),
                 .load_ready_o(a_ready[i][j][k]),
                 .set_final_o(a_final[i][j][k]),
                 .next_final_o(a_next[i][j][k]),
@@ -515,6 +528,16 @@ module SystolicMesh #(
     else $error("SystolicMesh: result read with no result outstanding");
   a_wide_read_outstanding: assert property (@(posedge clk_i) disable iff (!rstn_i) wide_read_enable_i |-> out_full[out_rd])
     else $error("SystolicMesh: wide result read with no result outstanding");
+  a_pack_range: assert property (@(posedge clk_i) disable iff (!rstn_i) start_accept |-> int'(pack_shift_i) < $clog2(MATRIX_SIZE))
+    else $error("SystolicMesh: pack shift %0d leaves blocks narrower than 2 of N=%0d", pack_shift_i, MATRIX_SIZE);
+  a_pack_collapsed: assert property (@(posedge clk_i) disable iff (!rstn_i) (start_accept && pack_shift_i != 0) |-> COLLAPSE_K != 0)
+    else $error("SystolicMesh: a packed set on the collapse-k 0 mesh");
+  a_pack_one_pass: assert property (@(posedge clk_i) disable iff (!rstn_i)
+                                    (start_accept && pack_shift_i != 0) |-> (!partial_i && !last_partial))
+    else $error("SystolicMesh: a packed set is part of an accumulated sum");
+  a_wide_packed: assert property (@(posedge clk_i) disable iff (!rstn_i)
+                                  (wide_read_enable_i && wide_read_packed_i) |-> (WIDE_READ % MATRIX_SIZE == 0))
+    else $error("SystolicMesh: a packed wide read needs N (%0d) to divide WIDE_READ (%0d)", MATRIX_SIZE, WIDE_READ);
 `ifdef ASSERT_SELFTEST
   a_selftest: assert property (@(posedge clk_i) disable iff (!rstn_i) 1'b0)
     else $error("SystolicMesh: assertion self-test fired, so assertions are live");

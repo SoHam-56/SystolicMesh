@@ -12,7 +12,8 @@ module SystolicArray #(
     parameter int WEST_WORDS  = K,  // A words per write: one row of A
     parameter int NORTH_WORDS = N,  // B words per write: one row of B
     parameter int BANKS       = 3,  // sets whose partials the PEs hold at once
-    parameter int U           = (K < sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1) ? K : sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1  // partial sums per pixel, combined by the reader
+    parameter int U           = (K < sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1) ? K : sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1,  // partial sums per pixel, combined by the reader
+    parameter int COL0        = 0   // mesh column of this tile's column 0, for packed blocks
 ) (
     input logic clk_i,
     input logic rstn_i,
@@ -24,6 +25,7 @@ module SystolicArray #(
     input logic                                   commit_i,      // the operands just written form a pass: queue it
     input logic                                   commit_fresh_i,  // with commit_i: the pass starts a set
     input logic                                   commit_more_i,   // with commit_i: another pass of the same set follows
+    input logic [2:0]                             commit_pack_i,   // with commit_i: the pass's pack shift
     output logic                                  load_ready_o,  // an operand bank is free to write
 
     output logic                               set_final_o,    // the oldest unread set is final in every PE
@@ -54,6 +56,7 @@ module SystolicArray #(
   logic fb;  // oldest queued bank, next to feed
   logic [1:0] ob_full;  // committed, not yet fed out
   logic [1:0] ob_fresh, ob_more;  // per operand bank: the pass's flags
+  logic [2:0] ob_pack[2];  // per operand bank: the pass's pack shift
 
   assign load_ready_o = !ob_full[lb];
 
@@ -63,6 +66,7 @@ module SystolicArray #(
   logic          cmd_ob[N];
   logic          cmd_f [N];
   logic          cmd_m [N];
+  logic [2:0]    cmd_p [N];
   logic feeding;
   logic [KW-1:0] kk;
   logic ob_cur;
@@ -82,6 +86,8 @@ module SystolicArray #(
       ob_full <= '0;
       ob_fresh <= '0;
       ob_more <= '0;
+      ob_pack[0] <= '0;
+      ob_pack[1] <= '0;
       feeding <= 1'b0;
       kk      <= '0;
       ob_cur  <= 1'b0;
@@ -92,6 +98,7 @@ module SystolicArray #(
         cmd_ob[r] <= 1'b0;
         cmd_f[r]  <= 1'b0;
         cmd_m[r]  <= 1'b0;
+        cmd_p[r]  <= '0;
       end
     end else begin
       if (west_write_enable_i && wa < AD) begin
@@ -106,6 +113,7 @@ module SystolicArray #(
         ob_full[lb] <= 1'b1;
         ob_fresh[lb] <= commit_fresh_i;
         ob_more[lb] <= commit_more_i;
+        ob_pack[lb] <= commit_pack_i;
         lb <= ~lb;
         wa <= '0;
         wb <= '0;
@@ -127,12 +135,14 @@ module SystolicArray #(
       cmd_ob[0] <= launch ? fb : ob_cur;
       cmd_f[0]  <= launch ? ob_fresh[fb] : ob_fresh[ob_cur];
       cmd_m[0]  <= launch ? ob_more[fb] : ob_more[ob_cur];
+      cmd_p[0]  <= launch ? ob_pack[fb] : ob_pack[ob_cur];
       for (int r = 1; r < N; r++) begin
         cmd_v[r]  <= cmd_v[r-1];
         cmd_kk[r] <= cmd_kk[r-1];
         cmd_ob[r] <= cmd_ob[r-1];
         cmd_f[r]  <= cmd_f[r-1];
         cmd_m[r]  <= cmd_m[r-1];
+        cmd_p[r]  <= cmd_p[r-1];
       end
       // The bank is free once the last row and column have taken their last operand.
       if (cmd_v[N-1] && cmd_kk[N-1] == KW'(K - 1)) ob_full[cmd_ob[N-1]] <= 1'b0;
@@ -142,6 +152,7 @@ module SystolicArray #(
   // ── Skewed feed registers ─────────────────────────────────────────────
   logic [DATA_WIDTH-1:0] a_feed[N], b_feed[N];
   logic v_feed[N], f_feed[N], m_feed[N];
+  logic [2:0] p_feed[N];
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -151,12 +162,14 @@ module SystolicArray #(
         v_feed[r] <= 1'b0;
         f_feed[r] <= 1'b0;
         m_feed[r] <= 1'b0;
+        p_feed[r] <= '0;
       end
     end else begin
       for (int r = 0; r < N; r++) begin
         v_feed[r] <= cmd_v[r];
         f_feed[r] <= cmd_f[r];
         m_feed[r] <= cmd_m[r];
+        p_feed[r] <= cmd_p[r];
         a_feed[r] <= cmd_v[r] ? a_mem[cmd_ob[r]][r*K+int'(cmd_kk[r])] : '0;
         b_feed[r] <= cmd_v[r] ? b_mem[cmd_ob[r]][int'(cmd_kk[r])*N+r] : '0;  // column r of B
       end
@@ -167,6 +180,7 @@ module SystolicArray #(
   logic [DATA_WIDTH-1:0] a_w[N][N+1];  // a_w[r][c] enters PE(r,c) from the west
   logic [DATA_WIDTH-1:0] b_n[N+1][N];  // b_n[r][c] enters PE(r,c) from the north
   logic v_w[N][N+1], f_w[N][N+1], m_w[N][N+1];  // valid and pass flags travel east with A
+  logic [2:0] p_w[N][N+1];  // pack shift travels east with A
   logic [U-1:0][ACC_W-1:0] part[N][N];
   logic [BANKS-1:0] pe_final[N*N];
   logic [BW-1:0] rb;  // oldest unread accumulator bank
@@ -176,6 +190,7 @@ module SystolicArray #(
     assign v_w[r][0] = v_feed[r];
     assign f_w[r][0] = f_feed[r];
     assign m_w[r][0] = m_feed[r];
+    assign p_w[r][0] = p_feed[r];
     assign b_n[0][r] = b_feed[r];
   end
 
@@ -189,7 +204,8 @@ module SystolicArray #(
           .K         (K),
           .BANKS     (BANKS),
           .U         (U),
-          .BW        (BW)
+          .BW        (BW),
+          .COL       (COL0 + c)
       ) pe (
           .clk_i    (clk_i),
           .rstn_i   (rstn_i),
@@ -203,6 +219,8 @@ module SystolicArray #(
           .v_o      (v_w[r][c+1]),
           .fresh_o  (f_w[r][c+1]),
           .more_o   (m_w[r][c+1]),
+          .pack_i   (p_w[r][c]),
+          .pack_o   (p_w[r][c+1]),
           .rd_bank_i(rb),
           .partial_o(part[r][c]),
           .release_i(release_i),
