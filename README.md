@@ -21,11 +21,11 @@ Times assume a 950 MHz clock ([why](#performance)).
 
 What makes it fast:
 
-- **Every array runs the full depth.** Each T × T array owns one output tile and multiplies across the whole depth K, so all arrays finish together and no cross-array reduction is needed. That is N² processing elements in total. A depth-sliced mode (`COLLAPSE_K = 0`) trades N/T times more elements for a few cycles of latency.
+- **Each array computes a whole block of the result.** C is split into T × T blocks, and each block has its own array that runs the complete dot products, so all arrays finish together and nothing has to be combined afterwards. That takes N² processing elements, one per output element. An optional mode (`COLLAPSE_K = 0`) splits each dot product across several arrays for a few cycles less latency, at N/T times the processing elements.
 - **Nothing waits for anything else.** Operands move one element per cycle through each array, so the next matrix pair enters the cycle after the last product of the current one. Two staging banks let the host load the next pair while the current one is broadcast.
-- **Adder latency is hidden.** Each processing element rotates its products through several partial sums, so it takes a new product every cycle despite a multi-cycle adder. Four partial-sum banks and four result banks let one set accumulate while earlier sets are reduced and read out.
-- **Weights stay on chip.** A weight cache holds reused B tiles, so the host sends only A. Partial sums can also stay in the elements across sets, so a deep K is accumulated without leaving the mesh.
-- **Small jobs share the mesh.** A packed set puts independent small matrix multiplies on the diagonal of B, and each element skips products outside its own block.
+- **The adder never stalls the multiplier.** A floating-point add takes several cycles. Each processing element therefore keeps several running sums and adds each new product to the next one in turn, so it accepts a product every cycle. Spare banks of running sums and of results let one matrix pair compute while earlier ones are finished and read out.
+- **Weights stay on chip.** A weight cache holds blocks of B that are used again, so the host sends only A. Running sums can also stay in the processing elements from one matrix pair to the next, so a product deeper than N is built up without leaving the mesh.
+- **Small jobs share the mesh.** Several independent small matrix multiplies can be packed side by side into one, each in its own block, and run together. Each processing element ignores everything outside its block, so every result is identical to running the jobs one at a time.
 - **One design, three formats.** The number format is a build parameter: fp32, bf16, or int8 with int32 sums. The multipliers and adders come from [ArithmeticLibrary](https://github.com/SoHam-56/ArithmeticLibrary).
 
 ---
