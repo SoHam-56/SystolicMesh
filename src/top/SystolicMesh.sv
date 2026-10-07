@@ -73,9 +73,13 @@ module SystolicMesh #(
   logic [2:0] stg_pack;
   logic [WCTW-1:0] stg_tile;
   assign {stg_last, stg_tile, stg_cached, stg_pack, stg_bias_v, stg_partial} = staging.data[STG_W-1:0];
+  logic live;  // out of reset for a cycle: advertisements wait for it, so no credit leaves while in reset
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) live <= 1'b0;
+    else live <= 1'b1;
   logic [1:0] stg_owed;  // staging credits still to return: the advertisement
   logic stg_credit;
-  assign stg_credit = bcast_release || (stg_owed != 0);
+  assign stg_credit = bcast_release || (live && stg_owed != 0);
   assign staging.credit = stg_credit;
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) stg_owed <= 2'd2;
@@ -144,14 +148,14 @@ module SystolicMesh #(
   end
 
   // ── L2: one slot per region; a put opens a fill, the fill's last set closes it, that set's broadcast returns the credit ──
-  logic [1:0] wc_ret, wc_adv;  // wc_adv: the advertisement after reset
+  logic [1:0] wc_ret, wc_adv;  // wc_adv: the advertisement, sent once live
   for (genvar r = 0; r < 2; r++) begin : WC_LINK
-    assign wc_ret[r] = wc_adv[r] || (bcast_release && in_cached[in_rd] && in_last[in_rd] && in_tile[in_rd][WCTW-1] == 1'(r));
+    assign wc_ret[r] = (live && wc_adv[r]) || (bcast_release && in_cached[in_rd] && in_last[in_rd] && in_tile[in_rd][WCTW-1] == 1'(r));
     assign wc_region[r].credit = wc_ret[r];
   end
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) wc_adv <= 2'b11;
-    else wc_adv <= 2'b00;
+    else if (live) wc_adv <= 2'b00;
   function automatic logic [DATA_WIDTH-1:0] b_word(input int addr);
     return in_cached[in_rd] ? wcache[int'(in_tile[in_rd])*GLOBAL_ELEMENTS+addr] : mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr];
   endfunction
@@ -406,6 +410,9 @@ module SystolicMesh #(
     if ($bits(staging.data) != STG_W || $bits(result.data) != RES_W || $bits(result.credit) != RES_CRW)
       $fatal(1, "SystolicMesh: links need staging.data %0d bits, result.data %0d, result.credit RES_CRW %0d", STG_W, RES_W, RES_CRW);
 `endif
+  if (RES_CRW > $clog2(RES_MAX + 1)) begin : G_BAD_RES_CRW  // credit_counter would drop the credit's high bits
+    $fatal(1, "SystolicMesh: RES_CRW %0d is wider than the result counter's %0d bits (RES_MAX %0d)", RES_CRW, $clog2(RES_MAX + 1), RES_MAX);
+  end
 
   MeshOutputSram #(
       .DEPTH(RESULT_BANKS * GLOBAL_ELEMENTS),
@@ -564,13 +571,13 @@ module SystolicMesh #(
       for (int r = 0; r < 2; r++)
         if (wc_put[r]) wc_open[r] <= 1'b1;
         else if (start_accept && stg_cached && stg_last && stg_tile[WCTW-1] == 1'(r)) wc_open[r] <= 1'b0;
-  logic sa_cached_q, sa_open_q;  // a cached set, and its region's fill was open
+  logic sa_cached_q, sa_open_q, sa_last_q;  // a cached set, its region's fill was open, it is marked the fill's last
   logic [2:0] sa_shift_q;
   logic [$clog2(BIAS_Q):0] sa_bq_n_q;
   always_ff @(posedge clk_i or negedge rstn_i)
-    if (!rstn_i) {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q, sa_cached_q, sa_open_q} <= '0;
-    else {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q, sa_cached_q, sa_open_q} <=
-             {start_accept, stg_partial, last_partial, stg_bias_v, stg_pack, bq_n, stg_cached, wc_open[stg_tile[WCTW-1]]};
+    if (!rstn_i) {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q, sa_cached_q, sa_open_q, sa_last_q} <= '0;
+    else {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q, sa_cached_q, sa_open_q, sa_last_q} <=
+             {start_accept, stg_partial, last_partial, stg_bias_v, stg_pack, bq_n, stg_cached, wc_open[stg_tile[WCTW-1]], stg_last};
   // A staging put, a row write and a cache write, each with its terms, registered for the same reason: a host drives them at the edge too.
   logic sp_q, sp_full_q, rw_q, rw_full_q, wcw_q, wcw_open_q, wcw_hit_q;
   logic wc_hit;  // the cache write's tile is one a staged set reads
@@ -601,6 +608,8 @@ module SystolicMesh #(
     else $error("SystolicMesh: cache write into a region with no open fill (no put on its link, or its last set already put)");
   a_wc_tile_free: assert property (@(posedge clk_i) disable iff (!rstn_i) wcw_q |-> !wcw_hit_q)
     else $error("SystolicMesh: cache write into a tile a staged set still reads");
+  a_wc_last_cached: assert property (@(posedge clk_i) disable iff (!rstn_i) (sa_q && sa_last_q) |-> sa_cached_q)
+    else $error("SystolicMesh: wc_last on an uncached set: no region is released and its credit never returns");
   a_wc_set_open: assert property (@(posedge clk_i) disable iff (!rstn_i) (sa_q && sa_cached_q) |-> sa_open_q)
     else $error("SystolicMesh: a cached set reads a region with no open fill");
   a_stage_room: assert property (@(posedge clk_i) disable iff (!rstn_i) sp_q |-> !sp_full_q)

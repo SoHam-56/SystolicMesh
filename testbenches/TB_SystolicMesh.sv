@@ -1,6 +1,7 @@
 `timescale 1ns / 100ps
 
-// FAULT 1: rows and a staging put with no credit; 2: a cache write after its region's last set, then a cached set on an unfilled region; 3: a result link one bit narrow.
+// FAULT 1: rows and a staging put with no credit; 2: a cache write after its region's last set, then a cached set on an unfilled region;
+// 3: a result link one bit narrow; 4: wc_last on an uncached set; 5: RES_CRW wider than the mesh's result counter.
 module TB_SystolicMesh #(
     parameter int FAULT = 0,
     parameter int WR    = 0,  // words per result beat; 0 is N
@@ -125,7 +126,7 @@ module TB_SystolicMesh #(
       .WIDE_READ  (WIDE_READ),
       .HOST_WORDS (HOST_WORDS),
       .WC_TILES   (WC_TILES),
-      .RES_MAX    (RES_CAP),
+      .RES_MAX    ((FAULT == 5) ? 1 : RES_CAP),
       .RES_CRW    (RES_CRW)
   ) dut (
       .clk_i(clk),
@@ -509,7 +510,7 @@ module TB_SystolicMesh #(
       $display("  [Action] Starting Matrix Mult...");
       drive_bias(set_id);
       drive_pack(set_id);
-      stg_put(1'b0, 0, 1'b0);
+      stg_put(1'b0, 0, FAULT == 4 && set_id == 0);
 
       // Timeout protection
       fork
