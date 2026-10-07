@@ -14,20 +14,17 @@ module SystolicMesh #(
     parameter ACC_BANKS    = 4,  // partial-sum banks per PE: a bank returns about 3K cycles after its set starts, so 4 keep K per set
     parameter WC_TILES     = 128,  // weight cache: N x N tiles of B, in two regions (tile MSB) so one fills while the other is read
     parameter WCTW         = $clog2(WC_TILES),
-    parameter WCAW         = $clog2(WC_TILES * MATRIX_SIZE * MATRIX_SIZE)
+    parameter WCAW         = $clog2(WC_TILES * MATRIX_SIZE * MATRIX_SIZE),
+    parameter int RES_MAX  = MATRIX_SIZE * MATRIX_SIZE / WIDE_READ,  // the most result credits the consumer may advertise
+    parameter int RES_CRW  = 1  // result.credit width
 ) (
     input logic clk_i,
     input logic rstn_i,
-    input logic start_matrix_mult_i,
-    input logic partial_i,  // with the start: keep this set's sums in the PEs, the next set adds to them and is reduced
-    input logic                                  bias_valid_i,  // with the start: add bias_i[c] to every element of column c
-    input logic [MATRIX_SIZE-1:0][ACC_W-1:0]      bias_i,
-    input logic [2:0]                            pack_shift_i,  // with the start: a packed set, b = N >> pack_shift_i columns per job; 0 unpacked
-    input logic                                  weight_cached_i,  // with the start: B is cache tile weight_tile_i, the host sends only A
-    input logic [WCTW-1:0]                       weight_tile_i,
+    credit_link_if.consumer staging,  // L1: a put per set, data {wc_last, weight_tile, weight_cached, pack_shift[2:0], bias_valid, partial}
+    input logic [MATRIX_SIZE-1:0][ACC_W-1:0]      bias_i,  // with the put: add bias_i[c] to every element of column c
+    credit_link_if.consumer wc_region[2],  // L2: a put opens a fill of that region; its credit returns once the fill's last set is broadcast
     input logic                                  wc_write_enable_i,  // cache write of north_write_data_i at word wc_write_addr_i
     input logic [WCAW-1:0]                       wc_write_addr_i,
-    output logic [1:0]                           wc_region_busy_o,   // a started, not yet broadcast set reads this region
 
     input logic                  north_write_enable_i,
     input logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] north_write_data_i,
@@ -39,22 +36,9 @@ module SystolicMesh #(
     output logic north_queue_empty_o,
     output logic west_queue_empty_o,
     output logic matrix_mult_complete_o,
-    output logic collection_complete_o,
     output logic collection_active_o,
-    input  logic result_release_i,  // consumer finished reading the oldest result
-    output logic input_ready_o,     // a staging bank is free for the host
 
-    input  logic                  read_enable_i,
-    input  logic [          31:0] read_addr_i,
-    output logic [     ACC_W-1:0] read_data_o,
-    output logic                  read_valid_o,
-
-    // Wide read: word k is element k * (N*N / WIDE_READ) + wide_read_index_i of the oldest result.
-    input  logic                                 wide_read_enable_i,
-    input  logic [                         31:0] wide_read_index_i,
-    input  logic                                 wide_read_packed_i,  // the oldest result is packed: word k is column k % N, rows (k / N) * stride + index
-    output logic [WIDE_READ-1:0][     ACC_W-1:0] wide_read_data_o,
-    output logic                                 wide_read_valid_o
+    credit_link_if.producer result  // L3: N*N/WIDE_READ beats per result, data {packed, last, first, WIDE_READ words}
 );
 
   localparam TILES_PER_DIM = MATRIX_SIZE / TILE_SIZE;
@@ -72,6 +56,7 @@ module SystolicMesh #(
   logic last_partial;  // the previous accepted set continues into the next one
   logic [WCTW-1:0] in_tile[2];  // and from this tile
   logic [2:0] in_pack[2];  // per staging bank: the set's pack shift
+  logic [1:0] in_last;  // per staging bank: the set is the last to read its cache region before the region's next fill
   logic [$clog2(GLOBAL_ELEMENTS):0] ptr_A, ptr_B;
 `ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
   initial if ((GLOBAL_ELEMENTS % HOST_WORDS) != 0) $error("SystolicMesh: HOST_WORDS (%0d) must divide %0d", HOST_WORDS, GLOBAL_ELEMENTS);
@@ -79,12 +64,28 @@ module SystolicMesh #(
 `endif
   logic [1:0] in_full;  // per staging bank: a started set not yet broadcast
   logic in_wr, in_rd;  // bank the host writes, bank BROADCAST reads
+  logic in_room;  // the bank the host writes is free; a host holding a staging credit always finds it so
   logic start_accept, bcast_release;
-  assign input_ready_o = !in_full[in_wr];
-  assign start_accept  = start_matrix_mult_i && input_ready_o;
+
+  // ── L1: one staging credit per bank, both advertised after reset, then one per broadcast ──
+  localparam int STG_W = WCTW + 7;
+  logic stg_partial, stg_bias_v, stg_cached, stg_last;  // the put's sideband, fields as in the staging port comment
+  logic [2:0] stg_pack;
+  logic [WCTW-1:0] stg_tile;
+  assign {stg_last, stg_tile, stg_cached, stg_pack, stg_bias_v, stg_partial} = staging.data[STG_W-1:0];
+  logic [1:0] stg_owed;  // staging credits still to return: the advertisement
+  logic stg_credit;
+  assign stg_credit = bcast_release || (stg_owed != 0);
+  assign staging.credit = stg_credit;
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) stg_owed <= 2'd2;
+    else stg_owed <= stg_owed + 2'(bcast_release) - 2'(stg_credit);
+
+  assign in_room = !in_full[in_wr];
+  assign start_accept = staging.put && in_room;
   logic west_wr_ok, north_wr_ok;
-  assign west_wr_ok  = west_write_enable_i && input_ready_o && !west_write_reset_i && ptr_A < GLOBAL_ELEMENTS;
-  assign north_wr_ok = north_write_enable_i && input_ready_o && !north_write_reset_i && ptr_B < GLOBAL_ELEMENTS;
+  assign west_wr_ok  = west_write_enable_i && in_room && !west_write_reset_i && ptr_A < GLOBAL_ELEMENTS;
+  assign north_wr_ok = north_write_enable_i && in_room && !north_write_reset_i && ptr_B < GLOBAL_ELEMENTS;
   localparam int RBW = $clog2(RESULT_BANKS);
   logic [RESULT_BANKS-1:0] out_full;  // per result bank: holds a finished, unreleased result
   logic loading_done;
@@ -105,6 +106,7 @@ module SystolicMesh #(
       in_tile[1] <= '0;
       in_pack[0] <= '0;
       in_pack[1] <= '0;
+      in_last <= '0;
     end else begin
       // A write in the start cycle is the set's last row and lands before the bank switches.
       if (west_wr_ok)
@@ -118,12 +120,13 @@ module SystolicMesh #(
       else if (north_wr_ok) ptr_B <= ptr_B + HOST_WORDS;
       if (start_accept) begin
         in_full[in_wr] <= 1'b1;
-        in_cached[in_wr] <= weight_cached_i;
+        in_cached[in_wr] <= stg_cached;
         in_fresh[in_wr] <= !last_partial;
-        in_more[in_wr] <= partial_i;
-        last_partial <= partial_i;
-        in_tile[in_wr] <= weight_tile_i;
-        in_pack[in_wr] <= pack_shift_i;
+        in_more[in_wr] <= stg_partial;
+        last_partial <= stg_partial;
+        in_tile[in_wr] <= stg_tile;
+        in_pack[in_wr] <= stg_pack;
+        in_last[in_wr] <= stg_last;
         in_wr <= ~in_wr;
       end
       if (bcast_release) begin
@@ -139,11 +142,16 @@ module SystolicMesh #(
     if (wc_write_enable_i)
       for (int c = 0; c < HOST_WORDS; c++) wcache[int'(wc_write_addr_i)+c] <= north_write_data_i[c];
   end
-  always_comb begin
-    wc_region_busy_o = '0;
-    for (int b = 0; b < 2; b++)
-      if (in_full[b] && in_cached[b]) wc_region_busy_o[in_tile[b][WCTW-1]] = 1'b1;
+
+  // ── L2: one slot per region; a put opens a fill, the fill's last set closes it, that set's broadcast returns the credit ──
+  logic [1:0] wc_ret, wc_adv;  // wc_adv: the advertisement after reset
+  for (genvar r = 0; r < 2; r++) begin : WC_LINK
+    assign wc_ret[r] = wc_adv[r] || (bcast_release && in_cached[in_rd] && in_last[in_rd] && in_tile[in_rd][WCTW-1] == 1'(r));
+    assign wc_region[r].credit = wc_ret[r];
   end
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) wc_adv <= 2'b11;
+    else wc_adv <= 2'b00;
   function automatic logic [DATA_WIDTH-1:0] b_word(input int addr);
     return in_cached[in_rd] ? wcache[int'(in_tile[in_rd])*GLOBAL_ELEMENTS+addr] : mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr];
   endfunction
@@ -206,7 +214,7 @@ module SystolicMesh #(
     end
   end
 
-  // ── Result banks: FREE, WRITING from reduce start, FULL once written, FREE again on release ──
+  // ── Result banks: FREE, WRITING from reduce start, FULL once written, FREE again after its last beat is pushed ──
   typedef enum logic [1:0] {
     R_FREE,
     R_WRITING,
@@ -221,6 +229,10 @@ module SystolicMesh #(
   for (genvar b = 0; b < RESULT_BANKS; b++) begin : OUT_FULL
     assign out_full[b] = (out_state[b] == R_FULL);
   end
+  localparam int BEATS = GLOBAL_ELEMENTS / WIDE_READ;  // beats per pushed result
+  logic [RESULT_BANKS-1:0] out_pk;  // per result bank: a packed set, pushed in the packed order
+  logic [BIAS_Q-1:0] bias_pk;  // per bias queue entry: the sum is a packed set
+  logic res_put, rq_last;  // a beat on the result link; the result's last
   // Idle reducers take the oldest final set; reducers reading their last pixel take the next one, as the oldest is released.
   assign reduce_start = reducers_ready && (out_state[out_wr] == R_FREE) &&
                         (reducers_read_done ? arrays_next_final : arrays_final);
@@ -243,7 +255,7 @@ module SystolicMesh #(
         out_state[wr_bank_done] <= R_FULL;
         wr_bank_done <= next_bank(wr_bank_done);
       end
-      if (result_release_i && out_full[out_rd]) begin
+      if (res_put && rq_last) begin
         out_state[out_rd] <= R_FREE;
         out_rd <= next_bank(out_rd);
       end
@@ -268,17 +280,22 @@ module SystolicMesh #(
       bq_rd   <= '0;
       bq_n    <= '0;
       bias_qv <= '0;
+      bias_pk <= '0;
     end else begin
       // One entry per sum: its first pass brings the bias, later passes of the same sum bring none.
       if (bias_push) begin
         for (int c = 0; c < MATRIX_SIZE; c++) bias_q[bq_wr][c] <= bias_i[c];
-        bias_qv[bq_wr] <= bias_valid_i;
+        bias_qv[bq_wr] <= stg_bias_v;
+        bias_pk[bq_wr] <= stg_pack != 3'd0;
         bq_wr <= bq_wr + 1'b1;
       end
       if (reduce_start) bq_rd <= bq_rd + 1'b1;
       bq_n <= bq_n + (bias_push ? 1'b1 : 1'b0) - (reduce_start ? 1'b1 : 1'b0);
     end
   end
+  always_ff @(posedge clk_i or negedge rstn_i)  // the pack flag goes with its sum from the bias queue to the result bank
+    if (!rstn_i) out_pk <= '0;
+    else if (reduce_start) out_pk[out_wr] <= bias_pk[bq_rd];
 
   logic mesh_busy;  // a set is somewhere between staging and a written result; for testbenches
   assign mesh_busy = (bstate != B_IDLE) || arrays_busy || reducers_busy;
@@ -345,18 +362,49 @@ module SystolicMesh #(
   always_comb
     for (int p = 0; p < NUM_TILES; p++) sram_addr_bank[p] = sram_addr_agg[p];  // each reducer adds its own bank offset
 
-  localparam int WIDE_STRIDE = GLOBAL_ELEMENTS / WIDE_READ;
+  // ── L3: the oldest result goes out as BEATS wide beats, one read a cycle while a credit is held past this cycle's put ──
+  // Beat i word k is element k * BEATS + i; packed, it is column k % N of row (k / N) * BEATS + i, so a lane holds a column block.
+  localparam int RES_W = WIDE_READ * ACC_W + 3;
+  logic [$clog2(BEATS + 1)-1:0] pb_idx;  // next beat of the oldest result to read
+  logic res_rd, rq_first, rq_pk;
+  logic [$clog2(RES_MAX + 1)-1:0] res_cnt;  // result credits held
+  logic [WIDE_READ-1:0][ACC_W-1:0] res_words;
+  credit_counter #(.MAX(RES_MAX), .CRW(RES_CRW)) res_cc (.clk_i(clk_i), .rstn_i(rstn_i), .put_i(res_put), .credit_i(result.credit),
+                                                        .has_credit_o(), .count_o(res_cnt));
+  assign res_rd = out_full[out_rd] && (int'(pb_idx) < BEATS) && (int'(res_cnt) > int'(res_put));
+  assign result.put  = res_put;
+  assign result.data = {rq_pk, rq_last, rq_first, res_words};
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) begin
+      pb_idx   <= '0;
+      rq_first <= 1'b0;
+      rq_last  <= 1'b0;
+      rq_pk    <= 1'b0;
+    end else begin
+      if (res_rd) begin
+        rq_first <= pb_idx == 0;
+        rq_last  <= int'(pb_idx) == BEATS - 1;
+        rq_pk    <= out_pk[out_rd];
+        pb_idx   <= pb_idx + 1'b1;
+      end
+      if (res_put && rq_last) pb_idx <= '0;  // reads stopped at the last beat, so this never meets a read
+    end
+
   logic [WIDE_READ-1:0][31:0] wide_addr;
   always_comb
     for (int k = 0; k < WIDE_READ; k++)
-      wide_addr[k] = int'(out_rd) * GLOBAL_ELEMENTS + (wide_read_packed_i
-                     ? ((k / MATRIX_SIZE) * WIDE_STRIDE + int'(wide_read_index_i)) * MATRIX_SIZE + k % MATRIX_SIZE
-                     : k * WIDE_STRIDE + int'(wide_read_index_i));
+      wide_addr[k] = int'(out_rd) * GLOBAL_ELEMENTS + (out_pk[out_rd]
+                     ? ((k / MATRIX_SIZE) * BEATS + int'(pb_idx)) * MATRIX_SIZE + k % MATRIX_SIZE
+                     : k * BEATS + int'(pb_idx));
 
 `ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
   initial
     if (GLOBAL_ELEMENTS % WIDE_READ != 0)
       $error("SystolicMesh: WIDE_READ (%0d) must divide N*N (%0d)", WIDE_READ, GLOBAL_ELEMENTS);
+  // Interface widths are not elaboration constants in Verilator, so the link widths are checked at time 0.
+  initial
+    if ($bits(staging.data) != STG_W || $bits(result.data) != RES_W || $bits(result.credit) != RES_CRW)
+      $fatal(1, "SystolicMesh: links need staging.data %0d bits, result.data %0d, result.credit RES_CRW %0d", STG_W, RES_W, RES_CRW);
 `endif
 
   MeshOutputSram #(
@@ -370,17 +418,16 @@ module SystolicMesh #(
       .we_i(sram_we_agg),
       .waddr_i(sram_addr_bank),
       .wdata_i(sram_data_agg),
-      .read_enable_i(read_enable_i && read_addr_i < GLOBAL_ELEMENTS),
-      .read_addr_i(read_addr_i + int'(out_rd) * GLOBAL_ELEMENTS),
-      .read_data_o(read_data_o),
-      .read_valid_o(read_valid_o),
-      .wide_enable_i(wide_read_enable_i && wide_read_index_i < WIDE_STRIDE),
+      .read_enable_i(1'b0),  // the single-word port is unused: results leave on the link
+      .read_addr_i('0),
+      .read_data_o(),
+      .read_valid_o(),
+      .wide_enable_i(res_rd),
       .wide_addr_i(wide_addr),
-      .wide_data_o(wide_read_data_o),
-      .wide_valid_o(wide_read_valid_o)
+      .wide_data_o(res_words),
+      .wide_valid_o(res_put)
   );
 
-  assign collection_complete_o = out_full[out_rd];  // cleared by release, never sticky
   assign collection_active_o   = reducers_busy;
 
   // Per output tile: U partials from each depth slice, flattened for its reducer.
@@ -506,18 +553,37 @@ module SystolicMesh #(
 `ifndef SYNTHESIS
   // The accept's terms, registered: sampled assertion values miss a combinational start_accept when the host drives the start at the edge.
   logic sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q;  // sa_last_partial_q: last_partial before this accept updated it
+  // Per region: a fill was put and its last set not yet; the put only feeds these checks, the credit needs only the last set.
+  logic [1:0] wc_put, wc_open;
+  for (genvar r = 0; r < 2; r++) begin : WC_PUT
+    assign wc_put[r] = wc_region[r].put;
+  end
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) wc_open <= 2'b00;
+    else
+      for (int r = 0; r < 2; r++)
+        if (wc_put[r]) wc_open[r] <= 1'b1;
+        else if (start_accept && stg_cached && stg_last && stg_tile[WCTW-1] == 1'(r)) wc_open[r] <= 1'b0;
+  logic sa_cached_q, sa_open_q;  // a cached set, and its region's fill was open
   logic [2:0] sa_shift_q;
   logic [$clog2(BIAS_Q):0] sa_bq_n_q;
   always_ff @(posedge clk_i or negedge rstn_i)
-    if (!rstn_i) {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q} <= '0;
-    else {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q} <=
-             {start_accept, partial_i, last_partial, bias_valid_i, pack_shift_i, bq_n};
-  // A cache write's and a result read's terms, registered for the same reason: a host drives them at the edge too.
-  logic wcw_q, wcw_busy_q, rd_q, rd_full_q;
+    if (!rstn_i) {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q, sa_cached_q, sa_open_q} <= '0;
+    else {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q, sa_cached_q, sa_open_q} <=
+             {start_accept, stg_partial, last_partial, stg_bias_v, stg_pack, bq_n, stg_cached, wc_open[stg_tile[WCTW-1]]};
+  // A staging put, a row write and a cache write, each with its terms, registered for the same reason: a host drives them at the edge too.
+  logic sp_q, sp_full_q, rw_q, rw_full_q, wcw_q, wcw_open_q, wcw_hit_q;
+  logic wc_hit;  // the cache write's tile is one a staged set reads
+  always_comb begin
+    wc_hit = 1'b0;
+    for (int b = 0; b < 2; b++)
+      if (in_full[b] && in_cached[b] && int'(in_tile[b]) == int'(wc_write_addr_i) / GLOBAL_ELEMENTS) wc_hit = 1'b1;
+  end
   always_ff @(posedge clk_i or negedge rstn_i)
-    if (!rstn_i) {wcw_q, wcw_busy_q, rd_q, rd_full_q} <= '0;
-    else {wcw_q, wcw_busy_q, rd_q, rd_full_q} <=
-             {wc_write_enable_i, wc_region_busy_o[wc_write_addr_i[WCAW-1]], read_enable_i, out_full[out_rd]};
+    if (!rstn_i) {sp_q, sp_full_q, rw_q, rw_full_q, wcw_q, wcw_open_q, wcw_hit_q} <= '0;
+    else {sp_q, sp_full_q, rw_q, rw_full_q, wcw_q, wcw_open_q, wcw_hit_q} <=
+             {staging.put, in_full[in_wr], west_write_enable_i || north_write_enable_i, in_full[in_wr], wc_write_enable_i,
+              wc_open[wc_write_addr_i[WCAW-1]], wc_hit};
   // Handshake invariants; live only with --assert.
   a_result_bank_free: assert property (@(posedge clk_i) disable iff (!rstn_i) reduce_start |-> out_state[out_wr] == R_FREE)
     else $error("SystolicMesh: a reduce started into a result bank that is not free");
@@ -531,16 +597,20 @@ module SystolicMesh #(
     else $error("SystolicMesh: a reduce started with no bias queued");
   a_wc_bus: assert property (@(posedge clk_i) disable iff (!rstn_i) !(wc_write_enable_i && north_write_enable_i))
     else $error("SystolicMesh: a cache write and a B write share the north bus in one cycle");
-  a_wc_region_free: assert property (@(posedge clk_i) disable iff (!rstn_i) wcw_q |-> !wcw_busy_q)
-    else $error("SystolicMesh: cache write into a region a staged set still reads");
+  a_wc_fill_open: assert property (@(posedge clk_i) disable iff (!rstn_i) wcw_q |-> wcw_open_q)
+    else $error("SystolicMesh: cache write into a region with no open fill (no put on its link, or its last set already put)");
+  a_wc_tile_free: assert property (@(posedge clk_i) disable iff (!rstn_i) wcw_q |-> !wcw_hit_q)
+    else $error("SystolicMesh: cache write into a tile a staged set still reads");
+  a_wc_set_open: assert property (@(posedge clk_i) disable iff (!rstn_i) (sa_q && sa_cached_q) |-> sa_open_q)
+    else $error("SystolicMesh: a cached set reads a region with no open fill");
+  a_stage_room: assert property (@(posedge clk_i) disable iff (!rstn_i) sp_q |-> !sp_full_q)
+    else $error("SystolicMesh: staging put with both banks full, a put without a credit; ignored");
+  a_row_room: assert property (@(posedge clk_i) disable iff (!rstn_i) rw_q |-> !rw_full_q)
+    else $error("SystolicMesh: row write with no free staging bank, rows without a credit; dropped");
   a_staging_bank_full: assert property (@(posedge clk_i) disable iff (!rstn_i) bcast_release |-> in_full[in_rd])
     else $error("SystolicMesh: BROADCAST copied an empty staging bank");
   a_arrays_ready_on_launch: assert property (@(posedge clk_i) disable iff (!rstn_i) (load_we_A != '0) |-> arrays_load_ready)
     else $error("SystolicMesh: broadcast wrote an array whose operand bank was not free");
-  a_read_outstanding: assert property (@(posedge clk_i) disable iff (!rstn_i) rd_q |-> rd_full_q)
-    else $error("SystolicMesh: result read with no result outstanding");
-  a_wide_read_outstanding: assert property (@(posedge clk_i) disable iff (!rstn_i) wide_read_enable_i |-> out_full[out_rd])
-    else $error("SystolicMesh: wide result read with no result outstanding");
   a_pack_range: assert property (@(posedge clk_i) disable iff (!rstn_i) sa_q |-> int'(sa_shift_q) < $clog2(MATRIX_SIZE))
     else $error("SystolicMesh: pack shift %0d leaves blocks narrower than 2 of N=%0d", sa_shift_q, MATRIX_SIZE);
   a_pack_collapsed: assert property (@(posedge clk_i) disable iff (!rstn_i) (sa_q && sa_shift_q != 0) |-> COLLAPSE_K != 0)
@@ -548,9 +618,8 @@ module SystolicMesh #(
   a_pack_one_pass: assert property (@(posedge clk_i) disable iff (!rstn_i)
                                     (sa_q && sa_shift_q != 0) |-> (!sa_partial_q && !sa_last_partial_q))
     else $error("SystolicMesh: a packed set is part of an accumulated sum");
-  a_wide_packed: assert property (@(posedge clk_i) disable iff (!rstn_i)
-                                  (wide_read_enable_i && wide_read_packed_i) |-> (WIDE_READ % MATRIX_SIZE == 0))
-    else $error("SystolicMesh: a packed wide read needs N (%0d) to divide WIDE_READ (%0d)", MATRIX_SIZE, WIDE_READ);
+  a_wide_packed: assert property (@(posedge clk_i) disable iff (!rstn_i) (res_rd && out_pk[out_rd]) |-> (WIDE_READ % MATRIX_SIZE == 0))
+    else $error("SystolicMesh: a packed result's push needs N (%0d) to divide WIDE_READ (%0d)", MATRIX_SIZE, WIDE_READ);
 `ifdef ASSERT_SELFTEST
   a_selftest: assert property (@(posedge clk_i) disable iff (!rstn_i) 1'b0)
     else $error("SystolicMesh: assertion self-test fired, so assertions are live");

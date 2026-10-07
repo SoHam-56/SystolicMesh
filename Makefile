@@ -18,6 +18,9 @@ _FAST_FLAG = $(if $(filter 1,$(FAST)),--fast)
 
 DESIGN_FILES = \
   ../ArithmeticLibrary/Common/src/sienna_fmt_pkg.sv \
+  ../ArithmeticLibrary/Common/src/credit_link_if.sv \
+  ../ArithmeticLibrary/Common/src/credit_counter.sv \
+  ../ArithmeticLibrary/Common/src/credit_link_checker.sv \
   top/SystolicMesh.sv \
   top/SystolicArray.sv \
   mem/MeshOutputSram.sv \
