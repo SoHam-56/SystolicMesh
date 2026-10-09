@@ -223,8 +223,16 @@ def test_rand():
     assert (y == np.random.uniform(-1, 1, (8, 8)).astype(np.float32)).all()
 
 
+MIN_TESTS = 12  # tests this file holds; fewer run means one was lost, which is a failure
+
 if __name__ == "__main__":
+    ran = 0
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
             fn()
+            ran += 1
             print(f"PASS {name}")
+    if ran < MIN_TESTS:
+        print(f"FAIL: {ran} tests ran, fewer than MIN_TESTS {MIN_TESTS}")
+        sys.exit(1)
+    print(f"ALL {ran} PASSED")

@@ -83,15 +83,21 @@ def test_unskipped_mesh_differs():
     assert int(np.sum(plain != alone)) > 0
 
 
+MIN_TESTS = 4  # tests this file holds; fewer run means one was lost, which is a failure
+
 if __name__ == "__main__":
-    bad = 0
+    bad = ran = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
+            ran += 1
             try:
                 fn()
                 print(f"PASS {name}")
             except Exception as e:  # noqa: BLE001
                 bad += 1
                 print(f"FAIL {name}: {e!r}")
+    if ran < MIN_TESTS:
+        bad += 1
+        print(f"FAIL: {ran} tests ran, fewer than MIN_TESTS {MIN_TESTS}")
     print(f"{'ALL PASS' if bad == 0 else f'{bad} FAILED'}")
     sys.exit(1 if bad else 0)

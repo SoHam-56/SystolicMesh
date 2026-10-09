@@ -37,9 +37,14 @@ def test_error_line_is_not_a_pass():
     assert r["status"] == "NO-RUN", r
 
 
+MIN_TESTS = 4  # tests this file holds; fewer run means one was lost, which is a failure
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     for t in tests:
         t()
         print(f"PASS {t.__name__}")
+    if len(tests) < MIN_TESTS:
+        print(f"FAIL: {len(tests)} tests ran, fewer than MIN_TESTS {MIN_TESTS}")
+        sys.exit(1)
     print(f"ALL {len(tests)} PASSED")

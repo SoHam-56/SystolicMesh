@@ -328,7 +328,7 @@ def _report(results: list, N: int, fast: bool, group: str, checks: list) -> str:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     passed = sum(1 for r in results if r["status"] == "PASS")
     total = len(results)
-    bad = total - passed + sum(v != "PASS" for _, v in checks)
+    bad = total - passed + sum(v != "PASS" for _, v in checks) + (total == 0)  # no simulation is a failure
     verdict = ("READY" if bad == 0
                else f"NOT READY ({bad} failure{'s' if bad > 1 else ''})")
 
@@ -546,7 +546,9 @@ def main() -> None:
     for t, v in checks:
         print(f"  {ok('PASS') if v == 'PASS' else err('FAIL')}  {'make ' + t:<28}  [model check{'' if v == 'PASS' else ', ' + v}]")
 
-    clean = passed == total and all(v == "PASS" for _, v in checks)
+    if total == 0:  # finishing cleanly with nothing simulated is not a pass
+        print(err(f"  FAIL: no simulation ran (group {args.group}, tiles {tiles}, format {FMT}, collapse-k {COLLAPSE})"))
+    clean = total > 0 and passed == total and all(v == "PASS" for _, v in checks)
     verdict = (
         ok("✅  All tests passed — Sanity Clean")
         if clean
