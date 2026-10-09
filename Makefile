@@ -30,6 +30,8 @@ DESIGN_FILES = \
   ../ArithmeticLibrary/Multipliers/Karatsuba/src/karatsubaUnsigned.sv \
 	../ArithmeticLibrary/Multipliers/FP32/src/fp32Multiplier.sv \
   ../ArithmeticLibrary/Multipliers/FP/src/fpMultiplier.sv \
+  ../ArithmeticLibrary/Multipliers/FPWiden/src/fpMulWiden.sv \
+  ../ArithmeticLibrary/Converters/FPNarrow/src/fpNarrow.sv \
   ../ArithmeticLibrary/Adders/FP32/src/LZC.sv \
   ../ArithmeticLibrary/Adders/FP32/src/fp32Adder.sv \
   ../ArithmeticLibrary/Adders/FP/src/fpAdder.sv \
@@ -105,7 +107,7 @@ verilator:
 	@echo "-- Compiling Verilator simulation"
 	make -C $(VERILATOR_DIR) -f V$(TOP_MODULE).mk
 	@echo "-- Copying test files"
-	@rm -f $(VERILATOR_DIR)/packShift*.mem  # the copy below only adds; a shift left by an earlier test would pack this one
+	@rm -f $(VERILATOR_DIR)/packShift*.mem $(VERILATOR_DIR)/matrixBias*.mem $(VERILATOR_DIR)/acc*.mem  # the copy below only adds; an earlier test's shift, bias or passes would run in this one
 		@if ls $(TB_DIR)/stimulus/*.mem 1> /dev/null 2>&1; then \
 		cp $(TB_DIR)/stimulus/*.mem $(VERILATOR_DIR); \
 		fi

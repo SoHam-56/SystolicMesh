@@ -94,14 +94,58 @@ def test_int8_bias_file_and_wrap():
         sf.check_widths(d)
     assert len(w) == N and {len(x) for x in w} == {8}
     assert (C == _wrap32(N * 127 * 127 + b[None, :])).all() and (C < 0).all()
-    sf.configure("fp32", 4, 1)
+    sf.configure("bf16", 4, 1)
     with tempfile.TemporaryDirectory() as d:
-        open(os.path.join(d, "matrixBias_0.mem"), "w").write("00000001\n")
+        open(os.path.join(d, "matrixBias_0.mem"), "w").write("0001\n")
         try:
             sf.check_widths(d)
         except ValueError:
             return
-    raise AssertionError("check_widths took a bias file in fp32")
+    raise AssertionError("check_widths took a 4-digit bias file in bf16: the mesh would read it zero-extended, not widened")
+
+
+def test_float_bias_widened_and_special():
+    # bf16 bias bits widen exactly (x << 16) into 8-digit words; the model adds them in fp32; ±0 and subnormals in 3 of 4 columns
+    N = 8
+    sf.configure("bf16", 4, 1)
+    b = sf.float_bias(N, 1)
+    assert [int(x) for x in b[[0, 1, 2, 4, 5, 6]]] == [0x0000, 0x8000, 0x0001, 0x007F, 0x8001, 0x807F], [hex(x) for x in b]
+    A = sf.rand(-1, 1, (N, N)).astype(np.float32)
+    B = sf.rand(-1, 1, (N, N)).astype(np.float32)
+    with tempfile.TemporaryDirectory() as d:
+        sf.write_set(A, B, d, "_0", b)
+        w = _words(d, "matrixBias_0.mem")
+        c = [int(x, 16) for x in _words(d, "matrixC_0.mem")]
+        sf.check_widths(d)
+        sf.write_set(A, B, d, "_0")
+        assert not os.path.exists(os.path.join(d, "matrixBias_0.mem")), "a stale bias would bias the next set"
+    assert w[:3] == ["00000000", "80000000", "00010000"] and w[4] == "007f0000", w
+    f = mm.fpu.BF16
+    assert c == [int(x) for x in mm.matmul(f, [(sf.to_bits(A), sf.to_bits(B))], N, 4, 1, b).flatten()]
+
+
+def test_accum_files():
+    # one sum over 3 passes: accA/accB per pass, accC the model's result over every pass, accBias 8 digits; a test's first set clears them
+    N = 8
+    for fmt in ("fp32", "bf16", "int8"):
+        sf.configure(fmt, 4, 1)
+        passes = [(sf.rand(-1, 1, (N, N)).astype(np.float32), sf.rand(-1, 1, (N, N)).astype(np.float32)) for _ in range(3)]
+        bias = sf.int8_bias(N, "_0") if fmt == "int8" else sf.float_bias(N, 3)
+        with tempfile.TemporaryDirectory() as d:
+            C = sf.write_accum(passes, d, bias)
+            sf.check_widths(d)
+            names = sorted(os.listdir(d))
+            assert names == ["accA_0.mem", "accA_1.mem", "accA_2.mem", "accB_0.mem", "accB_1.mem", "accB_2.mem", "accBias.mem",
+                             "accC.mem"], names
+            assert {len(x) for x in _words(d, "accBias.mem")} == {8}
+            assert {len(x) for x in _words(d, "accC.mem")} == {sf.result_digits()}
+            if fmt == "int8":
+                ref = mm.matmul_int([(sf.to_int(A), sf.to_int(B)) for A, B in passes], N, bias)
+            else:
+                ref = mm.matmul(mm.fpu.FORMATS[fmt], [(sf.to_bits(A), sf.to_bits(B)) for A, B in passes], N, 4, 1, bias)
+            assert np.array_equal(C, ref), fmt
+            sf.write_set(passes[0][0], passes[0][1], d, "_0")
+            assert not [x for x in os.listdir(d) if x.startswith("acc")], "another test's accumulate files would run"
 
 
 def test_int8_rejects_what_is_not_int8():

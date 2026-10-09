@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Bit-exact model of SystolicMesh's arithmetic in the build's format: each PE sums product n of a set into slot n mod U
 (products counted across a set's passes, the first U adding to +0), then the reducer's pairwise tree adds the U partials of every
-depth slice with the bias as its last input. Operand order as the RTL: mul(A=a, B=b), PE add(A=slot, B=product), tree add(A=left, B=right)."""
+depth slice with the bias as its last input. Operand order as the RTL: mul(A=a, B=b), PE add(A=slot, B=product), tree add(A=left, B=right).
+bf16 multiplies exactly into fp32 (fpMulWiden), sums and the widened bias in fp32 (fp32Adder), and narrows each result once (fpNarrow)."""
 import os
 import sys
 
@@ -11,6 +12,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "Ari
 import fpu  # noqa: E402
 
 ADD_LAT = 5  # sienna_fmt_pkg::add_lat, every supported format
+
+
+def _prod(f, a, b):
+    """The PE's product in the accumulator's format: fp32Multiplier in fp32, fpMulWiden's exact fp32 product in bf16."""
+    return fpu.mul(f, a, b)[0] if f.m == 23 else fpu.mul_widen(f, a, b)[0]
 
 
 def matmul(f, passes, N, T, collapse_k=1, bias=None):
@@ -28,21 +34,21 @@ def matmul(f, passes, N, T, collapse_k=1, bias=None):
                 k = rp * AK + kk
                 a = np.broadcast_to(A[:, k][:, None], (N, N))
                 b = np.broadcast_to(B[k, :][None, :], (N, N))
-                acc[rp, u] = fpu.add(f, acc[rp, u], fpu.mul(f, a, b)[0])[0]
+                acc[rp, u] = fpu.add(fpu.FP32, acc[rp, u], _prod(f, a, b))[0]
             g += 1
     return _reduce(f, [acc[rp, u] for rp in range(RP) for u in range(U)], N, bias)
 
 
 def _reduce(f, parts, N, bias):
-    """The reducer: a pairwise tree over the partials with the bias as its last input; an odd entry waits a level."""
-    bias_row = np.zeros(N, dtype=np.int64) if bias is None else np.asarray(bias, dtype=np.int64)
+    """The reducer: a pairwise fp32 tree over the partials with the bias (f bits, widened) as its last input; the result in f."""
+    bias_row = np.zeros(N, dtype=np.int64) if bias is None else fpu.widen(f, bias)
     level = list(parts) + [np.broadcast_to(bias_row[None, :], (N, N))]
     while len(level) > 1:
-        nxt = [fpu.add(f, level[2 * m], level[2 * m + 1])[0] for m in range(len(level) // 2)]
+        nxt = [fpu.add(fpu.FP32, level[2 * m], level[2 * m + 1])[0] for m in range(len(level) // 2)]
         if len(level) % 2:
             nxt.append(level[-1])  # an odd entry out waits a level, as the RTL's PASS delay
         level = nxt
-    return np.asarray(level[0], dtype=np.int64)
+    return np.asarray(fpu.narrow(f, level[0]), dtype=np.int64)
 
 
 def matmul_packed(f, A, B, N, shift, bias=None):
@@ -58,7 +64,7 @@ def matmul_packed(f, A, B, N, shift, bias=None):
             k = c * b + r
             a = np.broadcast_to(A[:, k][:, None], (N, b))
             w = np.broadcast_to(B[k, cols][None, :], (N, b))
-            acc[r % U][:, cols] = fpu.add(f, acc[r % U][:, cols], fpu.mul(f, a, w)[0])[0]
+            acc[r % U][:, cols] = fpu.add(fpu.FP32, acc[r % U][:, cols], _prod(f, a, w))[0]
     return _reduce(f, [acc[u] for u in range(U)], N, bias)
 
 

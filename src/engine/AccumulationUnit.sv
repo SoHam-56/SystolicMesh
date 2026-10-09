@@ -8,7 +8,8 @@ module AccumulationUnit #(
     parameter N = 4,
     parameter EXP_W = 8,  // the build's format: fp32 8/23, bf16 8/7, int8 0/7
     parameter MAN_W = 23,
-    parameter ACC_W = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // partials, bias and results: int32 in int8, the format's width in floats
+    parameter ACC_W = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // partials, bias and the tree: int32 in int8, fp32 in every float format
+    parameter OUT_W = sienna_fmt_pkg::out_w(EXP_W, MAN_W),  // written results: int32 in int8, the format's own width in floats
     parameter MATRIX_WIDTH = 32,
     parameter TILE_ROW_OFFSET = 0,
     parameter TILE_COL_OFFSET = 0,
@@ -28,18 +29,20 @@ module AccumulationUnit #(
     output logic ready_o,  // not reading; a start is taken
     output logic write_en_o,
     output logic [31:0] write_addr_o,  // includes the result bank offset
-    output logic [ACC_W-1:0] write_data_o,
+    output logic [OUT_W-1:0] write_data_o,
     output logic written_o,  // one cycle: the last pixel of a set was written
     output logic busy_o  // reading, or pixels still in the tree
 );
   localparam int PIXELS = N * N;
   localparam int PW = (PIXELS > 1) ? $clog2(PIXELS) : 1;
-  localparam int ADD_LAT = sienna_fmt_pkg::add_lat(EXP_W, MAN_W);  // the format's adder: valid_i at t, done_o at t+ADD_LAT
+  localparam int ADD_LAT = sienna_fmt_pkg::add_lat(EXP_W, MAN_W);  // fp32Adder (every float) or intAdder: valid_i at t, done_o at t+ADD_LAT
 
   if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
     $fatal(1, "AccumulationUnit: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
   end else if (ACC_W != sienna_fmt_pkg::acc_w(EXP_W, MAN_W)) begin : G_BAD_ACC_W
     $fatal(1, "AccumulationUnit: ACC_W=%0d is not sienna_fmt_pkg::acc_w(%0d, %0d)", ACC_W, EXP_W, MAN_W);
+  end else if (OUT_W != sienna_fmt_pkg::out_w(EXP_W, MAN_W)) begin : G_BAD_OUT_W  // a result word would be truncated or padded silently
+    $fatal(1, "AccumulationUnit: OUT_W=%0d is not sienna_fmt_pkg::out_w(%0d, %0d)", OUT_W, EXP_W, MAN_W);
   end
   localparam int LEVELS = $clog2(P);  // adder levels; 0 when there is one partial
   localparam int LAT = 1 + LEVELS * ADD_LAT;  // read issue to tree output
@@ -115,20 +118,16 @@ module AccumulationUnit #(
 
   for (genvar l = 0; l < LEVELS; l++) begin : LVL
     localparam int IN_W = width_at(l);
-    localparam int OUT_W = width_at(l + 1);
-    logic [OUT_W-1:0] done_bits;
-    for (genvar m = 0; m < OUT_W; m++) begin : NODE
+    localparam int NXT_W = width_at(l + 1);
+    logic [NXT_W-1:0] done_bits;
+    for (genvar m = 0; m < NXT_W; m++) begin : NODE
       if (2 * m + 1 < IN_W) begin : ADD
-        if (sienna_fmt_pkg::is_fp32(EXP_W, MAN_W)) begin : G_FP32
-          fp32Adder adder (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(lvl_v[l]), .A(lvl_d[l][2*m]), .B(lvl_d[l][2*m+1]),
-                           .result_o(lvl_d[l+1][m]), .done_o(done_bits[m]), .overflow_o(), .underflow_o(), .invalid_o());
-        end else if (sienna_fmt_pkg::is_int(EXP_W)) begin : G_INT
+        if (sienna_fmt_pkg::is_int(EXP_W)) begin : G_INT
           intAdder #(.W(ACC_W)) adder (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(lvl_v[l]), .A(lvl_d[l][2*m]), .B(lvl_d[l][2*m+1]),
                                        .result_o(lvl_d[l+1][m]), .done_o(done_bits[m]));
-        end else begin : G_FP
-          fpAdder #(.EXP_W(EXP_W), .MAN_W(MAN_W)) adder (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(lvl_v[l]),
-              .A(lvl_d[l][2*m]), .B(lvl_d[l][2*m+1]), .result_o(lvl_d[l+1][m]), .done_o(done_bits[m]),
-              .overflow_o(), .underflow_o(), .invalid_o());
+        end else begin : G_FP32  // the accumulator's format: fp32 in every float build
+          fp32Adder adder (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(lvl_v[l]), .A(lvl_d[l][2*m]), .B(lvl_d[l][2*m+1]),
+                           .result_o(lvl_d[l+1][m]), .done_o(done_bits[m]), .overflow_o(), .underflow_o(), .invalid_o());
         end
       end else begin : PASS
         // An odd entry out: delay it by the adder latency so it stays aligned with its level.
@@ -153,7 +152,7 @@ module AccumulationUnit #(
         assign done_bits[m]  = vdly[ADD_LAT-1];
       end
     end
-    for (genvar m = OUT_W; m < P; m++) begin : UNUSED
+    for (genvar m = NXT_W; m < P; m++) begin : UNUSED
       assign lvl_d[l+1][m] = '0;
     end
     assign lvl_v[l+1] = done_bits[0];
@@ -165,7 +164,11 @@ module AccumulationUnit #(
   assign w_bank = tag_bank[LAT-1];
 
   assign write_en_o   = lvl_v[LEVELS];
-  assign write_data_o = lvl_d[LEVELS][0];
+  if (!sienna_fmt_pkg::is_int(EXP_W) && !sienna_fmt_pkg::is_fp32(EXP_W, MAN_W)) begin : G_NARROW  // bf16: each fp32 sum rounded once, to nearest even
+    fpNarrow #(.EXP_W(EXP_W), .MAN_W(MAN_W)) NARROW (.x_i(lvl_d[LEVELS][0]), .y_o(write_data_o));
+  end else begin : G_SAME  // fp32 and int8 write the sum itself
+    assign write_data_o = lvl_d[LEVELS][0];
+  end
   assign write_addr_o = int'(w_bank) * BANK_OFFSET +
                         ((TILE_ROW_OFFSET + int'(w_idx) / N) * MATRIX_WIDTH) + (TILE_COL_OFFSET + int'(w_idx) % N);
   assign written_o    = write_en_o && (w_idx == PW'(PIXELS - 1));

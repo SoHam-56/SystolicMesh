@@ -263,6 +263,8 @@ def _run_group(
             raw, wall = _make()
 
             parsed = _parse(raw)
+            if parsed["status"] == "PASS" and test.get("expect", "") not in raw:  # a stage the test needs never ran
+                parsed["status"] = "FAIL"
             log_name = f"{test['name']}_N{N}_T{tile}.log"
             os.makedirs(RESULTS_DIR, exist_ok=True)
             with open(os.path.join(RESULTS_DIR, log_name), "w") as fh:

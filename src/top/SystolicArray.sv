@@ -8,7 +8,7 @@ module SystolicArray #(
     parameter int EXP_W       = 8,   // the build's format: fp32 8/23 by default, bf16 8/7, int8 0/7
     parameter int MAN_W       = 23,
     parameter int DATA_WIDTH  = 1 + EXP_W + MAN_W,  // operands
-    parameter int ACC_W       = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // partial sums: int32 in int8, the format's width in floats
+    parameter int ACC_W       = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // partial sums: int32 in int8, fp32 in every float format
     parameter int WEST_WORDS  = K,  // A words per write: one row of A
     parameter int NORTH_WORDS = N,  // B words per write: one row of B
     parameter int BANKS       = 3,  // sets whose partials the PEs hold at once

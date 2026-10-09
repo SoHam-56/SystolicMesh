@@ -7,7 +7,7 @@ module ProcessingElement #(
     parameter int EXP_W      = 8,   // the build's format: fp32 8/23, bf16 8/7, int8 0/7
     parameter int MAN_W      = 23,
     parameter int DATA_WIDTH = 1 + EXP_W + MAN_W,  // operands
-    parameter int ACC_W      = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // products and sums: int32 in int8, DATA_WIDTH in the float formats
+    parameter int ACC_W      = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // products and sums: int32 in int8, fp32 in every float format
     parameter int K          = 4,  // products per set
     parameter int BANKS      = 3,  // sets held at once: one accumulating, the older ones finishing or being read
     parameter int U          = (K < sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1) ? K : sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1,  // partial sums per set: the adder latency plus one
@@ -120,7 +120,7 @@ module ProcessingElement #(
   logic [ACC_W-1:0] add_a;
   assign add_a = (prod_fresh && u_cnt < CW'(U)) ? '0 : acc[cur][slot];
 
-  // The multiplier and adder in the build's format; int8 multiplies exactly into int16 and accumulates in int32, wrapping.
+  // The multiplier by operand format, the adder by accumulator format: bf16 multiplies exactly into fp32 and sums in fp32; int8 into int32, wrapping.
   if (!sienna_fmt_pkg::supported(EXP_W, MAN_W)) begin : G_BAD_FORMAT
     $fatal(1, "ProcessingElement: unsupported format EXP_W=%0d MAN_W=%0d", EXP_W, MAN_W);
   end else if (ACC_W != sienna_fmt_pkg::acc_w(EXP_W, MAN_W)) begin : G_BAD_ACC_W
@@ -138,10 +138,13 @@ module ProcessingElement #(
     intAdder #(.W(ACC_W)) ADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(prod_v), .A(add_a), .B(prod), .result_o(sum),
         .done_o(sum_v));
   end else begin : G_FP
-    fpMultiplier #(.EXP_W(EXP_W), .MAN_W(MAN_W)) MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i && in_blk), .A(a_i), .B(b_i),
-        .result_o(prod), .done_o(prod_v), .overflow_o(), .underflow_o(), .invalid_o());
-    fpAdder #(.EXP_W(EXP_W), .MAN_W(MAN_W)) ADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(prod_v), .A(add_a), .B(prod),
-        .result_o(sum), .done_o(sum_v), .overflow_o(), .underflow_o(), .invalid_o());
+    if ($bits(prod) != 32) begin : G_BAD_PROD  // fpMulWiden's fp32 product would be truncated silently
+      $fatal(1, "ProcessingElement: prod is %0d bits, fpMulWiden's fp32 product is 32", $bits(prod));
+    end
+    fpMulWiden #(.EXP_W(EXP_W), .MAN_W(MAN_W)) MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i && in_blk), .A(a_i), .B(b_i),
+        .result_o(prod), .done_o(prod_v), .overflow_o(), .underflow_o(), .invalid_o());  // prod is X before its first done_o; read with prod_v
+    fp32Adder ADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(prod_v), .A(add_a), .B(prod), .result_o(sum), .done_o(sum_v),
+                   .overflow_o(), .underflow_o(), .invalid_o());
   end
 
   // Where each add in flight writes back, and whether it is still in flight.

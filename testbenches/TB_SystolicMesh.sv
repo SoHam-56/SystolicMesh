@@ -12,7 +12,8 @@ module TB_SystolicMesh #(
   localparam int MAN_W = 23;
   localparam int COLLAPSE_K = 1;  // patched by regression.py --collapse-k
   localparam DATA_WIDTH = 1 + EXP_W + MAN_W;
-  localparam int ACC_W = sienna_fmt_pkg::acc_w(EXP_W, MAN_W);  // result words: int32 in int8, DATA_WIDTH in floats
+  localparam int ACC_W = sienna_fmt_pkg::acc_w(EXP_W, MAN_W);  // bias words: int32, or fp32 in every float format
+  localparam int OUT_W = sienna_fmt_pkg::out_w(EXP_W, MAN_W);  // result words: int32 in int8, DATA_WIDTH in floats
   localparam CLK_PERIOD = 10;
 
   localparam MATRIX_SIZE = 16;
@@ -40,7 +41,7 @@ module TB_SystolicMesh #(
   localparam int WCAW = $clog2(WC_TILES * SRAM_SIZE);
   localparam int HALF = WC_TILES / 2;  // first tile of cache region 1
   localparam int STG_W = WCTW + 7;  // {wc_last, weight_tile, weight_cached, pack_shift[2:0], bias_valid, partial}
-  localparam int RES_W = WIDE_READ * ACC_W + 3;  // {packed, last, first, WIDE_READ words}
+  localparam int RES_W = WIDE_READ * OUT_W + 3;  // {packed, last, first, WIDE_READ words}
   localparam int MAX_RES = 64;  // results one run collects
 
   reg clk, rstn;
@@ -51,8 +52,8 @@ module TB_SystolicMesh #(
   reg wc_we = 1'b0;  // cache write of n_data at wc_addr
   reg [WCAW-1:0] wc_addr = '0;
 
-  reg     [     ACC_W-1:0] expected_mem          [0:SRAM_SIZE-1];
-  reg                              bias_v = 1'b0;  // the set's bias (int8: matrixBias<suffix>.mem), taken by the mesh with the put
+  reg     [     OUT_W-1:0] expected_mem          [0:SRAM_SIZE-1];
+  reg                              bias_v = 1'b0;  // the set's bias (matrixBias<suffix>.mem), taken by the mesh with the put
   reg [MATRIX_SIZE-1:0][ACC_W-1:0] bias_d = '0;
   reg [2:0] pack_d = '0;  // the set's pack shift (packShift<suffix>.mem), taken with the put
 
@@ -164,7 +165,7 @@ module TB_SystolicMesh #(
   logic [RES_W-1:0] res_fifo[$];
   int res_owed = 0;  // slots freed and not yet credited back
   int res_got = 0, res_beat = 0, res_bad = 0;  // results collected, beats of the next one, framing errors
-  logic [ACC_W-1:0] res_store[MAX_RES][SRAM_SIZE];
+  logic [OUT_W-1:0] res_store[MAX_RES][SRAM_SIZE];
   bit res_pk[MAX_RES];
   bit res_hit[SRAM_SIZE];  // elements of the result being collected
 
@@ -184,7 +185,7 @@ module TB_SystolicMesh #(
         $display("  [FAIL] Result %0d beat %0d word %0d: element %0d out of range or pushed twice", res_got, res_beat, k, e);
       end else begin
         res_hit[e] = 1'b1;
-        if (res_got < MAX_RES) res_store[res_got][e] = d[k*ACC_W+:ACC_W];
+        if (res_got < MAX_RES) res_store[res_got][e] = d[k*OUT_W+:OUT_W];
       end
     end
     res_owed++;
@@ -333,7 +334,7 @@ module TB_SystolicMesh #(
 
   task verify_results(input string filename, output int err_count);
     integer fh, i, res;
-    reg [ACC_W-1:0] exp_val, actual_val;
+    reg [OUT_W-1:0] exp_val, actual_val;
     begin
       $display("  [Verify] Checking against %s...", filename);
       fh = $fopen(filename, "r");
@@ -389,12 +390,14 @@ module TB_SystolicMesh #(
     end
   endtask
 
-  // ── Per-set bias: the mesh samples bias_i with the put; matrixBias<suffix>.mem exists only in int8 ────────
+  // ── Per-set bias: the mesh samples bias_i with the put; matrixBias<suffix>.mem holds ACC_W words (floats widened to fp32) ────────
   task automatic drive_bias(input int s);
-    string f;
+    load_bias((NUM_TEST_SETS == 1) ? "matrixBias.mem" : $sformatf("matrixBias_%0d.mem", s));
+  endtask
+
+  task automatic load_bias(input string f);  // no file: no bias
     integer fh, res;
     reg [ACC_W-1:0] tmp;
-    f = (NUM_TEST_SETS == 1) ? "matrixBias.mem" : $sformatf("matrixBias_%0d.mem", s);
     bias_d = '0;
     bias_v = 1'b0;
     fh = $fopen(f, "r");
@@ -433,12 +436,14 @@ module TB_SystolicMesh #(
     while (!stg_has) @(negedge clk);
   endtask
 
-  task automatic stg_put(input bit cached, input int tile, input bit last);
+  task automatic stg_put(input bit cached, input int tile, input bit last, input bit partial = 1'b0);  // partial: a pass follows
     @(negedge clk);
-    stg.data = {last, WCTW'(tile), cached, pack_d, bias_v, 1'b0};
+    stg.data = {last, WCTW'(tile), cached, pack_d, bias_v, partial};
     stg.put  = 1'b1;
-    if (n_puts < MAX_RES) put_pk[n_puts] = (pack_d != 0);
-    n_puts++;
+    if (!partial) begin  // one result per sum, so put_pk follows the results
+      if (n_puts < MAX_RES) put_pk[n_puts] = (pack_d != 0);
+      n_puts++;
+    end
     @(negedge clk);
     stg.put = 1'b0;
   endtask
@@ -783,6 +788,50 @@ module TB_SystolicMesh #(
     drain_check("weight cache");
   endtask
 
+  // ── Accumulate: one sum over accA_<p>/accB_<p>.mem, partial on every pass but the last, accBias.mem with the first ─────
+  task automatic accum_pass();
+    int np, errs;
+    integer fh;
+    np = 0;
+    forever begin
+      fh = $fopen($sformatf("accA_%0d.mem", np), "r");
+      if (!fh) break;
+      $fclose(fh);
+      np++;
+    end
+    if (np == 0) return;
+    $display("\n[STAGE] ACCUMULATE: one sum over %0d passes, the bias with the first, one result", np);
+    fork
+      begin
+        for (int p = 0; p < np; p++) begin
+          wait_stg_credit();
+          fork
+            load_west_queue($sformatf("accA_%0d.mem", p));
+            load_north_queue($sformatf("accB_%0d.mem", p));
+          join
+          if (p == 0) load_bias("accBias.mem");
+          else begin
+            bias_d = '0;
+            bias_v = 1'b0;
+          end
+          pack_d = '0;
+          stg_put(1'b0, 0, 1'b0, p != np - 1);
+        end
+        verify_results("accC.mem", errs);
+        total_sets_run++;
+        if (errs == 0) sets_passed++;
+        else sets_failed++;
+      end
+      begin
+        repeat (TIMEOUT_CYCLES * (np + 1)) @(posedge clk);
+        $display("  [FATAL] Timeout in the accumulate pass");
+        $finish;
+      end
+    join_any
+    disable fork;
+    drain_check("accumulate");
+  endtask
+
   // ── Top-level stimulus ────────────────────────────────────────────────────
   initial begin
     $dumpfile("TB_SystolicMesh.vcd");
@@ -801,7 +850,8 @@ module TB_SystolicMesh #(
     $display(" Tile Size:      %0d x %0d", TILE_SIZE, TILE_SIZE);
     $display(" Tiles in mesh:  %0d x %0d", MATRIX_SIZE / TILE_SIZE, MATRIX_SIZE / TILE_SIZE);
     $display(" Sets to Run:    %0d", NUM_TEST_SETS);
-    $display(" Format:         EXP_W=%0d MAN_W=%0d, %0d-bit operands, %0d-bit results", EXP_W, MAN_W, DATA_WIDTH, ACC_W);
+    $display(" Format:         EXP_W=%0d MAN_W=%0d, %0d-bit operands, %0d-bit bias, %0d-bit results", EXP_W, MAN_W, DATA_WIDTH, ACC_W,
+             OUT_W);
     $display(" Result link:    %0d words per beat, %0d beats per set, %0d slots, %0d%% stalls", WIDE_READ, BEATS, res_slots,
              stall_pct);
     $display(" Compare:        bit-exact against mesh_model");
@@ -817,6 +867,7 @@ module TB_SystolicMesh #(
     stream_all_sets();
     producer_waits_test();
     cache_pass();
+    accum_pass();
 
     // ── Final report ───────────────────────────────────────────────────────
     $display("\n##############################################");

@@ -6,7 +6,8 @@ module SystolicMesh #(
     parameter EXP_W       = 8,   // the build's format: fp32 8/23 by default, bf16 8/7, int8 0/7
     parameter MAN_W       = 23,
     parameter DATA_WIDTH  = 1 + EXP_W + MAN_W,  // operands: host writes, staging banks, weight cache
-    parameter ACC_W       = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // sums, bias and results: int32 in int8, the format's width in floats
+    parameter ACC_W       = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // sums and bias: int32 in int8, fp32 in every float format
+    parameter OUT_W       = sienna_fmt_pkg::out_w(EXP_W, MAN_W),  // result words: int32 in int8, the format's own width in floats
     parameter WIDE_READ   = 1,  // words per wide result read, one per consumer lane
     parameter HOST_WORDS  = MATRIX_SIZE,  // words per host write, one matrix row; must divide MATRIX_SIZE*MATRIX_SIZE
     parameter COLLAPSE_K  = 1,  // 1: one full-depth tile per output tile, N^2 PEs and no reduce; 0: depth slices and the reduce tree
@@ -21,7 +22,7 @@ module SystolicMesh #(
     input logic clk_i,
     input logic rstn_i,
     credit_link_if.consumer staging,  // L1: a put per set, data {wc_last, weight_tile, weight_cached, pack_shift[2:0], bias_valid, partial}
-    input logic [MATRIX_SIZE-1:0][ACC_W-1:0]      bias_i,  // with the put: add bias_i[c] to every element of column c
+    input logic [MATRIX_SIZE-1:0][ACC_W-1:0]      bias_i,  // with the put: add bias_i[c] to every element of column c (float builds: fp32 bits, the caller widens)
     credit_link_if.consumer wc_region[2],  // L2: a put opens a fill of that region; its credit returns once the fill's last set is broadcast
     input logic                                  wc_write_enable_i,  // cache write of north_write_data_i at word wc_write_addr_i
     input logic [WCAW-1:0]                       wc_write_addr_i,
@@ -62,6 +63,9 @@ module SystolicMesh #(
   initial if ((GLOBAL_ELEMENTS % HOST_WORDS) != 0) $error("SystolicMesh: HOST_WORDS (%0d) must divide %0d", HOST_WORDS, GLOBAL_ELEMENTS);
   initial if (DATA_WIDTH != 1 + EXP_W + MAN_W) $error("SystolicMesh: DATA_WIDTH %0d is not 1 + EXP_W + MAN_W", DATA_WIDTH);
 `endif
+  if (OUT_W != sienna_fmt_pkg::out_w(EXP_W, MAN_W)) begin : G_BAD_OUT_W  // the result banks and link would truncate or pad silently
+    $fatal(1, "SystolicMesh: OUT_W=%0d is not sienna_fmt_pkg::out_w(%0d, %0d)", OUT_W, EXP_W, MAN_W);
+  end
   logic [1:0] in_full;  // per staging bank: a started set not yet broadcast
   logic in_wr, in_rd;  // bank the host writes, bank BROADCAST reads
   logic in_room;  // the bank the host writes is free; a host holding a staging credit always finds it so
@@ -360,7 +364,7 @@ module SystolicMesh #(
 
   logic [NUM_TILES-1:0]                 sram_we_agg;
   logic [NUM_TILES-1:0][          31:0] sram_addr_agg;
-  logic [NUM_TILES-1:0][     ACC_W-1:0] sram_data_agg;
+  logic [NUM_TILES-1:0][     OUT_W-1:0] sram_data_agg;
   logic [NUM_TILES-1:0][          31:0] sram_addr_bank;
 
   always_comb
@@ -368,11 +372,11 @@ module SystolicMesh #(
 
   // ── L3: the oldest result goes out as BEATS wide beats, one read a cycle while a credit is held past this cycle's put ──
   // Beat i word k is element k * BEATS + i; packed, it is column k % N of row (k / N) * BEATS + i, so a lane holds a column block.
-  localparam int RES_W = WIDE_READ * ACC_W + 3;
+  localparam int RES_W = WIDE_READ * OUT_W + 3;
   logic [$clog2(BEATS + 1)-1:0] pb_idx;  // next beat of the oldest result to read
   logic res_rd, rq_first, rq_pk;
   logic [$clog2(RES_MAX + 1)-1:0] res_cnt;  // result credits held
-  logic [WIDE_READ-1:0][ACC_W-1:0] res_words;
+  logic [WIDE_READ-1:0][OUT_W-1:0] res_words;
   credit_counter #(.MAX(RES_MAX), .CRW(RES_CRW)) res_cc (.clk_i(clk_i), .rstn_i(rstn_i), .put_i(res_put), .credit_i(result.credit),
                                                         .has_credit_o(), .count_o(res_cnt));
   assign res_rd = out_full[out_rd] && (int'(pb_idx) < BEATS) && (int'(res_cnt) > int'(res_put));
@@ -416,7 +420,7 @@ module SystolicMesh #(
 
   MeshOutputSram #(
       .DEPTH(RESULT_BANKS * GLOBAL_ELEMENTS),
-      .DATA_WIDTH(ACC_W),
+      .DATA_WIDTH(OUT_W),
       .NUM_PORTS(NUM_TILES),
       .WIDE(WIDE_READ)
   ) output_mem (
@@ -484,6 +488,7 @@ module SystolicMesh #(
             .EXP_W(EXP_W),
             .MAN_W(MAN_W),
             .ACC_W(ACC_W),
+            .OUT_W(OUT_W),
             .MATRIX_WIDTH(MATRIX_SIZE),
             .TILE_ROW_OFFSET(i * TILE_SIZE),
             .TILE_COL_OFFSET(j * TILE_SIZE)

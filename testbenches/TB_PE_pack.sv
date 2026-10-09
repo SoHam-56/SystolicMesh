@@ -95,7 +95,7 @@ module pe_pack_bench #(
         end
         want_muls[p] += bw;
         for (int u = 0; u < U; u++)
-          want[s][p][u] = !hit[u] ? '0 : IS_INT ? ACC_W'(sums[u]) : ACC_W'(fp32_of(sums[u]) >> (23 - MAN_W));
+          want[s][p][u] = !hit[u] ? '0 : IS_INT ? ACC_W'(sums[u]) : ACC_W'(fp32_of(sums[u]));  // floats: fp32 sums
       end
     end
     repeat (3) @(posedge clk);

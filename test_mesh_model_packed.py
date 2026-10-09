@@ -57,6 +57,23 @@ def test_packed_block_equals_alone():
                         assert np.array_equal(got, _alone(f, A, B, bias, N, c, b)), (fmt, N, shift, garbage, c)
 
 
+def _float(bits, fmt):
+    return (np.asarray(bits, np.int64) << (23 - fpu.FORMATS[fmt].m)).astype(np.uint32).view(np.float32).astype(np.float64)
+
+
+def test_bf16_k640_within_one_ulp():
+    # K = 640 (ad01's first layer): fp32 sums narrowed once are within 1 bf16 ulp of the largest output on 99% of words
+    f, N, P = fpu.BF16, 32, 20
+    rng = np.random.RandomState(640)
+    passes = [(_bits(rng.uniform(-1, 1, (N, N)), "bf16"), _bits(rng.uniform(-1, 1, (N, N)), "bf16")) for _ in range(P)]
+    got = _float(mm.matmul(f, passes, N, 4, 1), "bf16")
+    exact = np.hstack([_float(A, "bf16") for A, _ in passes]) @ np.vstack([_float(B, "bf16") for _, B in passes])
+    ref = _float(fpu.narrow(f, exact.astype(np.float32).view(np.uint32).astype(np.int64)), "bf16")
+    ulp = 2.0 ** (np.floor(np.log2(np.abs(ref).max())) - f.m)
+    ok = float(np.mean(np.abs(got - ref) <= ulp))
+    assert ok >= 0.99, f"{100 * ok:.1f}% of words within 1 ulp ({ulp}) of the largest output, max error {np.abs(got - ref).max()}"
+
+
 def test_unskipped_mesh_differs():
     # The probe's finding: without the skip, a block starting mid-rotation rounds differently from its job alone.
     f = fpu.FORMATS["fp32"]

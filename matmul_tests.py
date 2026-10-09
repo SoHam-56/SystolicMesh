@@ -26,6 +26,8 @@ Test catalogue
   mm_large_values  Values ±100  (accumulator range stress)
   mm_small_values  Values ±1e-6  (underflow / denormal stress)
   mm_alternating   ±1 checkerboard  (sign alternation in accumulation)
+  mm_bias_special  Float bias of ±0 and subnormals, rows of ±0  (the bias widened exactly)
+  mm_accum         One sum over 4 passes after the sets  (partial sums held to the last pass)
 
 int8: stim_format.rand draws the whole int8 range; mm_large_values uses -128 and 127, mm_small_values -1, 0 and 1, mm_signed_zero zeros.
 """
@@ -78,9 +80,10 @@ def _ref_matmul(A: np.ndarray, B: np.ndarray) -> np.ndarray:
 
 
 def _write_set(A: np.ndarray, B: np.ndarray,
-               stim_dir: str, suffix: str = "", pack: int = 0) -> None:
-    """Compute C = A @ B in the stimulus format and write its .mem files for one set (int8: with the set's bias; pack: a packed set)."""
-    bias = stim_format.int8_bias(B.shape[1], suffix) if stim_format.is_int() else None
+               stim_dir: str, suffix: str = "", pack: int = 0, float_bias=None) -> None:
+    """Compute C = A @ B in the stimulus format and write its .mem files for one set (int8: with the set's bias; floats: float_bias
+    bits; pack: a packed set)."""
+    bias = stim_format.int8_bias(B.shape[1], suffix) if stim_format.is_int() else float_bias
     stim_format.write_set(A, B, stim_dir, suffix, bias, pack)
 
 
@@ -254,6 +257,29 @@ def gen_mm_signed_zero(stim_dir: str, N: int) -> int:
     return _write_all(sets, stim_dir)
 
 
+def gen_mm_bias_special(stim_dir: str, N: int) -> int:
+    """Float bias rows of +0, -0 and subnormals of each sign over rows of ±0 and random rows; int8 takes its usual bias."""
+    for s in range(MATMUL_NUM_SETS):
+        _seed(7500 + s)
+        A = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
+        A[0::4, :] = np.float32(-0.0)
+        A[1::4, :] = np.float32(0.0)
+        B = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
+        _write_set(A, B, stim_dir, f"_{s}", 0, None if stim_format.is_int() else stim_format.float_bias(N, 7500 + s))
+    return MATMUL_NUM_SETS
+
+
+def gen_mm_accum(stim_dir: str, N: int) -> int:
+    """Random sets, then one sum over 4 passes with the bias on its first: the partial sums stay in the PEs until the last pass."""
+    gen_mm_random(stim_dir, N)
+    _seed(7600)
+    passes = [(stim_format.rand(-1, 1, (N, N)).astype(np.float32), stim_format.rand(-1, 1, (N, N)).astype(np.float32))
+              for _ in range(4)]
+    bias = stim_format.int8_bias(N, "_0") if stim_format.is_int() else stim_format.float_bias(N, 7600)
+    stim_format.write_accum(passes, stim_dir, bias)
+    return MATMUL_NUM_SETS
+
+
 # ---------------------------------------------------------------------------
 # Test catalogue
 #
@@ -270,6 +296,9 @@ MATMUL_TESTS = [
     dict(name="mm_small_values", description="Values ±1e-6; int8 -1/0/1  (underflow stress)", gen_fn=gen_mm_small_values),
     dict(name="mm_alternating",  description="±1 checkerboard  (sign alternation in accum.)",  gen_fn=gen_mm_alternating),
     dict(name="mm_signed_zero",  description="Rows of +0 and -0  (sign of zero sums)",          gen_fn=gen_mm_signed_zero),
+    dict(name="mm_bias_special", description="Float bias ±0 and subnormals; int8 its bias  (exact widen)", gen_fn=gen_mm_bias_special),
+    dict(name="mm_accum",        description="One sum over 4 passes  (partials held to the last pass)", gen_fn=gen_mm_accum,
+         expect="[STAGE] ACCUMULATE"),
     dict(name="mm_packed",       description="Packed sets, a shift per set  (block == job alone)", gen_fn=gen_mm_packed, packed=True),
     dict(name="mm_packed_garbage", description="Packed sets, random off-block weights  (skipped)", gen_fn=gen_mm_packed_garbage,
          packed=True),
