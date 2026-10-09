@@ -149,7 +149,6 @@ module TB_SystolicMesh #(
       .north_queue_empty_o(n_empty),
       .west_queue_empty_o(w_empty),
       .matrix_mult_complete_o(complete),
-      .collection_active_o(),
       .result(rsl)
   );
 

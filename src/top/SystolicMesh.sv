@@ -37,7 +37,6 @@ module SystolicMesh #(
     output logic north_queue_empty_o,
     output logic west_queue_empty_o,
     output logic matrix_mult_complete_o,
-    output logic collection_active_o,
 
     credit_link_if.producer result  // L3: N*N/WIDE_READ beats per result, data {packed, last, first, WIDE_READ words}
 );
@@ -434,8 +433,6 @@ module SystolicMesh #(
       .wide_data_o(res_words),
       .wide_valid_o(res_put)
   );
-
-  assign collection_active_o   = reducers_busy;
 
   // Per output tile: U partials from each depth slice, flattened for its reducer.
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][RPU-1:0][ACC_W-1:0] t_data;
