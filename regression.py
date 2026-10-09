@@ -51,7 +51,6 @@ Exit code: 0 = all pass, 1 = any failure or interrupted.
 """
 
 import argparse
-import math
 import os
 import re
 import subprocess

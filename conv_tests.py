@@ -79,7 +79,7 @@ _SEED_OFFSET = int(os.environ.get("SIENNA_SEED", "0"))
 def _seed(s: int) -> None:
     np.random.seed(s + _SEED_OFFSET)
 
-from matmul_tests import write_mem, pow2_tile_sizes, _ref_matmul
+from matmul_tests import pow2_tile_sizes, _ref_matmul
 
 # Fixed number of test sets written by every conv generator.
 # Advanced-stride may write more (it needs multiple batches per test);
