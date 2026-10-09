@@ -25,6 +25,7 @@ No changes to the Makefile are needed.
 
 Execution order
 ---------------
+  first the model checks (make aril-fpu, aril-narrow, model-tests), each against its own reference
   for each tile T:
       patch TB(N, T, MATMUL_NUM_SETS)     ← TB file touched, triggers compile
       for each matmul test:
@@ -44,6 +45,7 @@ Usage
   python regression.py --matrix-size 16 --fast
   python regression.py --matrix-size 64
   python regression.py --matrix-size 16 --format int8 --collapse-k 0
+  python regression.py --matrix-size 16 --no-checks   # simulations only, without the model checks
 
 Exit code: 0 = all pass, 1 = any failure or interrupted.
 """
@@ -154,6 +156,25 @@ def _make() -> tuple:
     if r.returncode != 0:
         out += f"\nBUILDFAIL: make exited {r.returncode}\n"
     return out, time.time() - t0
+
+
+# Make targets checked against their own references, not mesh_model's agreement with the RTL (a bug shared by both passes that).
+MODEL_CHECKS = ("aril-fpu", "aril-narrow", "model-tests")
+
+
+def _run_checks() -> list:
+    """Runs each MODEL_CHECKS target, its output in RESULTS_DIR/check_<target>.log: [(target, "PASS" or "FAIL (exit n)")]."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    out = []
+    for t in MODEL_CHECKS:
+        print(f"  [check] make {t}", end="  ", flush=True)
+        r = subprocess.run(["make", t], cwd=ROOT, capture_output=True, text=True)
+        with open(os.path.join(RESULTS_DIR, f"check_{t}.log"), "w") as fh:
+            fh.write(r.stdout + r.stderr)
+        v = "PASS" if r.returncode == 0 else f"FAIL (exit {r.returncode})"
+        print(ok(v) if v == "PASS" else err(v))
+        out.append((t, v))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -303,13 +324,14 @@ def _run_group(
 # ---------------------------------------------------------------------------
 
 
-def _report(results: list, N: int, fast: bool, group: str) -> str:
+def _report(results: list, N: int, fast: bool, group: str, checks: list) -> str:
     """Plain-text readiness report alongside the per-run logs."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     passed = sum(1 for r in results if r["status"] == "PASS")
     total = len(results)
-    verdict = ("READY" if passed == total
-               else f"NOT READY ({total - passed} failure{'s' if total-passed>1 else ''})")
+    bad = total - passed + sum(v != "PASS" for _, v in checks)
+    verdict = ("READY" if bad == 0
+               else f"NOT READY ({bad} failure{'s' if bad > 1 else ''})")
 
     W = 96
     L = []
@@ -347,6 +369,13 @@ def _report(results: list, N: int, fast: bool, group: str) -> str:
 
     _rows("Matrix multiplication", [r for r in results if r["group"] == "matmul"])
     _rows("Convolution", [r for r in results if r["group"] == "conv"])
+
+    if checks:
+        L.append("-" * W)
+        L.append("MODEL CHECKS (own references: hand corners, an integer RNE, float64)")
+        L.append("-" * W)
+        L += [f"{'make ' + t:<22}{v:>9}  check_{t}.log" for t, v in checks]
+        L.append("")
 
     L.append("-" * W)
     L.append("NOTES")
@@ -399,6 +428,8 @@ def main() -> None:
                         help="number format of the build; every format compares bit for bit against mesh_model")
     parser.add_argument("--collapse-k", type=int, choices=[0, 1], default=1,
                         help="1: full-depth arrays (the RTL default); 0: depth slices and the reduce tree")
+    parser.add_argument("--no-checks", action="store_true",
+                        help="skip the model checks (make aril-fpu, aril-narrow, model-tests); SIENNA's gate runs them as steps")
     args = parser.parse_args()
     global FMT, COLLAPSE
     FMT, COLLAPSE = args.format, args.collapse_k
@@ -473,6 +504,7 @@ def main() -> None:
         _original_tb = fh.read()
 
     all_results: list = []
+    checks = [] if args.no_checks else _run_checks()
 
     # ── Main loop ─────────────────────────────────────────────────────────
     try:
@@ -512,19 +544,22 @@ def main() -> None:
         sym = ok("PASS") if all_pass else err("FAIL")
         tlist = ", ".join(f"T{r['tile']}" for r in rows)
         print(f"  {sym}  {name:<28}  [{tlist}]")
+    for t, v in checks:
+        print(f"  {ok('PASS') if v == 'PASS' else err('FAIL')}  {'make ' + t:<28}  [model check{'' if v == 'PASS' else ', ' + v}]")
 
+    clean = passed == total and all(v == "PASS" for _, v in checks)
     verdict = (
         ok("✅  All tests passed — Sanity Clean")
-        if passed == total
+        if clean
         else err("❌  Failures detected — see logs")
     )
     print(hdr(f"\n  Verdict : {verdict}"))
 
-    rpt = _report(all_results, N, args.fast, args.group)
+    rpt = _report(all_results, N, args.fast, args.group, checks)
     print(f"  Report  : {rpt}")
     print(hdr(f"{'═'*64}\n"))
 
-    sys.exit(0 if passed == total else 1)
+    sys.exit(0 if clean else 1)
 
 
 if __name__ == "__main__":

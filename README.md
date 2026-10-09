@@ -84,6 +84,13 @@ Multiply-accumulates per cycle do not depend on the clock, so they compare desig
 - every tile size;
 - 8 × 8 to 32 × 32 in fp32, bf16 and int8, and 64 × 64 in fp32.
 
+Before the simulations, the regression checks the models against references of their own, so a rounding bug shared by the RTL and `mesh_model.py` still fails:
+- the fp32-to-bf16 rounding model against hand-derived corners and an integer round-to-nearest-even;
+- the `fpNarrow` RTL against those corners and the model on 1.2 million values;
+- `mesh_model.py` against float64 over 640 terms, and the stimulus words (`make model-tests`).
+
+`--no-checks` skips them.
+
 Unit benches check a single array, the int8 element and the packed element's skip on their own.
 
 ---

@@ -13,6 +13,7 @@ MATRIX_SIZE       ?= 16
 REGRESSION_GROUP  ?= all
 FAST              ?= 0
 REGRESSION_OPTS   ?=
+PYTHON            ?= python3
 
 _FAST_FLAG = $(if $(filter 1,$(FAST)),--fast)
 
@@ -168,4 +169,14 @@ regression:
 		$(_FAST_FLAG) \
 		$(REGRESSION_OPTS)
 
-.PHONY: default verilator vcs wave lint debug perf clean regression
+# Checks against their own references (hand corners, an integer RNE, float64), which a rounding bug shared by an RTL unit and its model fails.
+aril-fpu:
+	$(MAKE) -C $(PRJ_DIR)/ArithmeticLibrary/Common fpu
+
+aril-narrow:
+	$(MAKE) -C $(PRJ_DIR)/ArithmeticLibrary/Converters/FPNarrow all
+
+model-tests:
+	cd $(PRJ_DIR) && $(PYTHON) test_mesh_model_packed.py && $(PYTHON) test_stim_format.py
+
+.PHONY: default verilator vcs wave lint debug perf clean regression aril-fpu aril-narrow model-tests
