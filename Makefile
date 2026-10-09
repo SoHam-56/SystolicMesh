@@ -175,6 +175,6 @@ aril-narrow:
 	$(MAKE) -C $(PRJ_DIR)/ArithmeticLibrary/Converters/FPNarrow all
 
 model-tests:
-	cd $(PRJ_DIR) && $(PYTHON) test_mesh_model_packed.py && $(PYTHON) test_stim_format.py
+	cd $(PRJ_DIR) && $(PYTHON) test_mesh_model_packed.py && $(PYTHON) test_stim_format.py && $(PYTHON) test_regression_parse.py
 
 .PHONY: default verilator vcs wave lint debug perf clean regression aril-fpu aril-narrow model-tests
