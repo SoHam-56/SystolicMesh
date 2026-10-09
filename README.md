@@ -26,7 +26,7 @@ What makes it fast:
 - **The adder never stalls the multiplier.** A floating-point add takes several cycles. Each processing element therefore keeps several running sums and adds each new product to the next one in turn, so it accepts a product every cycle. Spare banks of running sums and of results let one matrix pair compute while earlier ones are finished and read out.
 - **Weights stay on chip.** A weight cache holds blocks of B that are used again, so the host sends only A. Running sums can also stay in the processing elements from one matrix pair to the next, so a product deeper than N is built up without leaving the mesh.
 - **Small jobs share the mesh.** Several independent small matrix multiplies can be packed side by side into one, each in its own block, and run together. Each processing element ignores everything outside its block, so every result is identical to running the jobs one at a time.
-- **Number format chosen at build time.** A build parameter selects fp32, bf16, or int8 with int32 sums, and with it the matching multipliers and adders from [ArithmeticLibrary](https://github.com/SoHam-56/ArithmeticLibrary). Each build runs one format.
+- **Number format chosen at build time.** A build parameter selects fp32, bf16, or int8 with int32 sums, and with it the matching multipliers and adders from [ArithmeticLibrary](https://github.com/SoHam-56/ArithmeticLibrary). Each build runs one format. bf16 multiplies bf16 numbers but keeps every running sum in fp32, and rounds each result back to bf16 only as it is written, so long dot products stay accurate: after 3 072 terms the largest error is 0.3% of the largest result, where bf16 sums were off by 50%.
 
 ---
 
