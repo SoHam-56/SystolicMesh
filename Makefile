@@ -29,12 +29,10 @@ DESIGN_FILES = \
   ../ArithmeticLibrary/Multipliers/Radix4Booth/src/R4Booth.sv \
   ../ArithmeticLibrary/Multipliers/Karatsuba/src/karatsubaUnsigned.sv \
 	../ArithmeticLibrary/Multipliers/FP32/src/fp32Multiplier.sv \
-  ../ArithmeticLibrary/Multipliers/FP/src/fpMultiplier.sv \
   ../ArithmeticLibrary/Multipliers/FPWiden/src/fpMulWiden.sv \
   ../ArithmeticLibrary/Converters/FPNarrow/src/fpNarrow.sv \
   ../ArithmeticLibrary/Adders/FP32/src/LZC.sv \
   ../ArithmeticLibrary/Adders/FP32/src/fp32Adder.sv \
-  ../ArithmeticLibrary/Adders/FP/src/fpAdder.sv \
   ../ArithmeticLibrary/Multipliers/Int/src/intMultiplier.sv \
   ../ArithmeticLibrary/Adders/Int/src/intAdder.sv
 

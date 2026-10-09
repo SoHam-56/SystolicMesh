@@ -47,6 +47,7 @@ module pe_pack_bench #(
   // fp32 bits of an integer in [0, 2^24), built by hand: Verilator's $shortrealtobits gave 0, so every float slot read 0 == 0.
   function automatic logic [31:0] fp32_of(input longint v);
     int e = 0;
+    if (v < 0 || v >= (64'sd1 << 24)) $fatal(1, "fp32_of: %0d is outside [0, 2^24), where the encoding is exact", v);
     if (v == 0) return '0;
     while ((v >> (e + 1)) != 0) e++;
     return {1'b0, 8'(127 + e), 23'((v << (23 - e)) & 64'h7FFFFF)};

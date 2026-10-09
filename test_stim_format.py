@@ -148,6 +148,16 @@ def test_accum_files():
             assert not [x for x in os.listdir(d) if x.startswith("acc")], "another test's accumulate files would run"
 
 
+def test_range_edge_rows():
+    # bf16: row 0's fp32 sum 0x7F7F8000 narrows to +inf, row 2 to -inf; rows 1 and 3 pass above bf16's max and cancel to +-2^119
+    for ck, T in ((1, 4), (0, 2), (0, 4)):
+        sf.configure("bf16", T, ck)
+        with tempfile.TemporaryDirectory() as d:
+            mt.gen_mm_range_edge(d, 8)
+            c = _words(d, "matrixC_0.mem")
+        assert [c[8 * r] for r in range(4)] == ["7f80", "7b00", "ff80", "fb00"], (ck, T, [c[8 * r] for r in range(4)])
+
+
 def test_int8_rejects_what_is_not_int8():
     sf.configure("int8", 4, 1)
     for bad in (0.5, 128.0, -129.0):

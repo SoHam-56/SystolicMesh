@@ -26,7 +26,8 @@ Test catalogue
   mm_large_values  Values ±100  (accumulator range stress)
   mm_small_values  Values ±1e-6  (underflow / denormal stress)
   mm_alternating   ±1 checkerboard  (sign alternation in accumulation)
-  mm_bias_special  Float bias of ±0 and subnormals, rows of ±0  (the bias widened exactly)
+  mm_bias_special  Float bias with ±0 and subnormals, rows of ±0  (normal columns catch a zero-extended bias)
+  mm_range_edge    Sums past bf16's largest finite: one narrows to ±inf, one cancels back  (floats only)
   mm_accum         One sum over 4 passes after the sets  (partial sums held to the last pass)
 
 int8: stim_format.rand draws the whole int8 range; mm_large_values uses -128 and 127, mm_small_values -1, 0 and 1, mm_signed_zero zeros.
@@ -81,8 +82,7 @@ def _ref_matmul(A: np.ndarray, B: np.ndarray) -> np.ndarray:
 
 def _write_set(A: np.ndarray, B: np.ndarray,
                stim_dir: str, suffix: str = "", pack: int = 0, float_bias=None) -> None:
-    """Compute C = A @ B in the stimulus format and write its .mem files for one set (int8: with the set's bias; floats: float_bias
-    bits; pack: a packed set)."""
+    """Writes one set in the stimulus format: int8 with its bias, floats with float_bias bits if given, pack a packed set."""
     bias = stim_format.int8_bias(B.shape[1], suffix) if stim_format.is_int() else float_bias
     stim_format.write_set(A, B, stim_dir, suffix, bias, pack)
 
@@ -258,7 +258,7 @@ def gen_mm_signed_zero(stim_dir: str, N: int) -> int:
 
 
 def gen_mm_bias_special(stim_dir: str, N: int) -> int:
-    """Float bias rows of +0, -0 and subnormals of each sign over rows of ±0 and random rows; int8 takes its usual bias."""
+    """Float bias rows mixing normals with ±0 and subnormals (which the fp32 adder reads as +0); int8 takes its usual bias."""
     for s in range(MATMUL_NUM_SETS):
         _seed(7500 + s)
         A = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
@@ -280,6 +280,28 @@ def gen_mm_accum(stim_dir: str, N: int) -> int:
     return MATMUL_NUM_SETS
 
 
+def _b16(bits) -> np.float32:
+    """A bf16 bit pattern as its exact float32 value."""
+    return np.uint32(int(bits) << 16).view(np.float32)
+
+
+def gen_mm_range_edge(stim_dir: str, N: int) -> int:
+    """Rows 0/2: 1.5*2^127 + 2^125 + ... + 2^119 = fp32 0x7F7F8000, a tie that narrows to ±inf; rows 1/3: max - max + 2^119 cancels back."""
+    big = [0x7F40] + [(e + 127) << 7 for e in range(125, 118, -1)]  # eight exact bf16 products of 1.0; N >= 8
+    for s in range(MATMUL_NUM_SETS):
+        _seed(7700 + s)
+        A = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
+        B = stim_format.rand(-1, 1, (N, N)).astype(np.float32)
+        B[:, 0::2] = np.float32(1.0)  # even columns sum each row of A
+        A[:4, :] = np.float32(0.0)
+        for k, v in enumerate(big[:N]):
+            A[0, k], A[2, k] = _b16(v), _b16(v | 0x8000)
+        A[1, 0], A[1, 1], A[1, 2] = _b16(0x7F7F), _b16(0x7B00), _b16(0xFF7F)  # the tree's first pair (products 0, 1) exceeds bf16's max
+        A[3, 0], A[3, 1], A[3, 2] = _b16(0xFF7F), _b16(0xFB00), _b16(0x7F7F)
+        _write_set(A, B, stim_dir, f"_{s}")
+    return MATMUL_NUM_SETS
+
+
 # ---------------------------------------------------------------------------
 # Test catalogue
 #
@@ -296,7 +318,10 @@ MATMUL_TESTS = [
     dict(name="mm_small_values", description="Values ±1e-6; int8 -1/0/1  (underflow stress)", gen_fn=gen_mm_small_values),
     dict(name="mm_alternating",  description="±1 checkerboard  (sign alternation in accum.)",  gen_fn=gen_mm_alternating),
     dict(name="mm_signed_zero",  description="Rows of +0 and -0  (sign of zero sums)",          gen_fn=gen_mm_signed_zero),
-    dict(name="mm_bias_special", description="Float bias ±0 and subnormals; int8 its bias  (exact widen)", gen_fn=gen_mm_bias_special),
+    dict(name="mm_bias_special", description="Float bias with ±0 and subnormals; int8 its bias  (normal columns catch zero-extension)",
+         gen_fn=gen_mm_bias_special),
+    dict(name="mm_range_edge",   description="Sums past bf16's max: to ±inf, and cancelled back  (fp32 sums only)", gen_fn=gen_mm_range_edge,
+         float_only=True),
     dict(name="mm_accum",        description="One sum over 4 passes  (partials held to the last pass)", gen_fn=gen_mm_accum,
          expect="[STAGE] ACCUMULATE"),
     dict(name="mm_packed",       description="Packed sets, a shift per set  (block == job alone)", gen_fn=gen_mm_packed, packed=True),

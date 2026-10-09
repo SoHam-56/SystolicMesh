@@ -265,6 +265,7 @@ def _run_group(
             parsed = _parse(raw)
             if parsed["status"] == "PASS" and test.get("expect", "") not in raw:  # a stage the test needs never ran
                 parsed["status"] = "FAIL"
+                print(err(f"[FAIL] '{test['expect']}' is not in the log"), end="  ")
             log_name = f"{test['name']}_N{N}_T{tile}.log"
             os.makedirs(RESULTS_DIR, exist_ok=True)
             with open(os.path.join(RESULTS_DIR, log_name), "w") as fh:
@@ -419,6 +420,7 @@ def main() -> None:
     else:
         run_mm, run_conv = mm_tests, conv_tests
     run_mm = [t for t in run_mm if COLLAPSE or not t.get("packed")]  # packing is collapse-k only (the mesh asserts it)
+    run_mm = [t for t in run_mm if not (t.get("float_only") and stim_format.is_int())]  # float values beyond int8's range
 
     # Conv tests use a general 3x3 layout when N is not a perfect square; see conv_tests._general_pair.
 

@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""The mesh stimulus's number format: operand words in the format and the bit-exact expected result from mesh_model in every
-format (fp32 included), for the TB's exact compare. int8 operands are 2 hex digits, its int32 results 8; bias words are 8 in every
-format (int32, or the float bias widened exactly to fp32)."""
+"""Mesh stimulus words in the build's format (bias always 8 hex digits) and the bit-exact expected result from mesh_model."""
 import os
 import struct
 
@@ -103,8 +101,7 @@ def _bias_words(bias) -> np.ndarray:
 
 
 def write_set(A, B, stim_dir, suffix="", bias=None, pack=0):
-    """Writes one set's matrixA/B/C<suffix>.mem (bias: matrixBias, int8 values or the float format's bits; pack != 0 packShift,
-    C per block alone); returns C (int8: int64)."""
+    """Writes one set's matrixA/B/C<suffix>.mem, matrixBias (int8 values or float bits) and packShift; returns C."""
     N = B.shape[1]
     if suffix in ("", "_0"):  # a test's first set: another test's accumulate files would run in this one
         for fn in os.listdir(stim_dir):
