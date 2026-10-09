@@ -5,7 +5,6 @@ TB_DIR = $(PRJ_DIR)/testbenches
 # Toolchain
 VERILATOR = verilator
 VCS = vcs
-VVP = vvp
 WAVE = surfer
 
 REGRESSION_SCRIPT = $(PRJ_DIR)/regression.py
@@ -113,7 +112,7 @@ verilator:
 	@echo "-- Running Verilator simulation"
 	cd $(VERILATOR_DIR) && $(shell command -v stdbuf >/dev/null && echo stdbuf -oL) ./$(TOP_MODULE)_sim $(SIM_ARGS)  # line-buffered, so a crash log shows how far it got; SIM_ARGS go to the simulator
 	@echo "-- Verilator simulation complete"
-	@echo "-- Trace file: $(VERILATOR_DIR)/dump.vcd"
+	@echo "-- Trace file (TRACE=1): $(VERILATOR_DIR)/$(TOP_MODULE).vcd"
 
 vcs:
 	@echo "=== VCS simulation for Systolic Array ==="
@@ -144,7 +143,6 @@ lint:
 	@echo "-- Lint check complete"
 
 debug: VERILATOR_FLAGS += --debug --gdbbt
-debug: IVERILOG_FLAGS += -g
 debug: verilator
 
 perf: VERILATOR_FLAGS += --stats --profile-cfuncs
@@ -152,7 +150,7 @@ perf: verilator
 
 clean:
 	@echo "-- Cleaning simulation artifacts"
-	-rm -rf $(VERILATOR_DIR) $(IVERILOG_DIR) $(VCS_DIR)
+	-rm -rf $(VERILATOR_DIR) $(VCS_DIR)
 	-rm -f *.vpd *.vcd *.wlf *.log
 	-rm -f csrc simv simv.daidir
 	-rm -f *.key DVEfiles
