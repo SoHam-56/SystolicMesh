@@ -429,10 +429,6 @@ module SystolicMesh #(
       .we_i(sram_we_agg),
       .waddr_i(sram_addr_bank),
       .wdata_i(sram_data_agg),
-      .read_enable_i(1'b0),  // the single-word port is unused: results leave on the link
-      .read_addr_i('0),
-      .read_data_o(),
-      .read_valid_o(),
       .wide_enable_i(res_rd),
       .wide_addr_i(wide_addr),
       .wide_data_o(res_words),
