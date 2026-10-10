@@ -59,7 +59,7 @@ VERILATOR_FLAGS = \
 	--timing \
 	--assert \
 	--top-module $(TOP_MODULE) \
-	--threads 8 \
+	--threads $(shell nproc) \
 	--build-jobs $(shell nproc) \
 	--output-split 20000 \
 	--output-split-cfuncs 20000 \
