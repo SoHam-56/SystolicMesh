@@ -223,7 +223,21 @@ def test_rand():
     assert (y == np.random.uniform(-1, 1, (8, 8)).astype(np.float32)).all()
 
 
-MIN_TESTS = 12  # tests this file holds; fewer run means one was lost, which is a failure
+def test_general_conv_pair_fits_small_n():
+    # N = 8 has no room for a 3x3 kernel (depth 9), so the general conv layout takes a 2x2 kernel over 2 channels; N >= 9 keeps 3x3
+    import conv_tests as ct
+    sf.configure("fp32", 2, 1)
+    for N, K, c_in in ((8, 2, 2), (32, 3, 3)):
+        A, B = ct._general_pair(N, 5)[0]
+        D = K * K * c_in
+        g = int(np.sqrt(N))
+        assert B.shape == (N, N) and (B[D:] == 0).all() and (B[:D] != 0).all(), (N, D)
+        assert (A[:, D:] == 0).all() and (A[g * g:] == 0).all() and (A[:g * g, :D] != 0).any(axis=1).all(), N
+        imp = ct._general_pair(N, 5, kernel="impulse")[0][1]
+        assert imp[:, 0].sum() == 1.0 and imp[((K // 2) * K + K // 2) * c_in, 0] == 1.0, N
+
+
+MIN_TESTS = 13  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     ran = 0

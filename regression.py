@@ -452,7 +452,7 @@ def main() -> None:
     run_mm = [t for t in run_mm if COLLAPSE or not t.get("packed")]  # packing is collapse-k only (the mesh asserts it)
     run_mm = [t for t in run_mm if not (t.get("float_only") and stim_format.is_int())]  # float values beyond int8's range
 
-    # Conv tests use a general 3x3 layout when N is not a perfect square; see conv_tests._general_pair.
+    # Conv tests use a general 3x3 layout (2x2 below N = 9) when N is not a perfect square; see conv_tests._general_pair.
 
     # ── Tile list ─────────────────────────────────────────────────────────
     all_tiles = pow2_tile_sizes(N)

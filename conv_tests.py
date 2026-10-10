@@ -145,13 +145,13 @@ def _is_square(N: int) -> bool:
 
 def _general_pair(N: int, seed: int, kernel: str = "random", grid=None, stride=None,
                   c_in=None, n_filters: int = 1) -> tuple:
-    """One (A, B) im2col pair for any N: a 3x3 kernel over c_in channels, depth zero-padded to N.
+    """One (A, B) im2col pair for any N: a 3x3 kernel (2x2 below N = 9) over c_in channels, depth zero-padded to N.
 
     Rows of A are patches (at most N per pair; unused rows are zero), columns of B are filters.
     kernel: random | zero | ones | impulse | large.  n_filters > 1 gives distinct filter columns;
     otherwise the one filter is repeated across all N columns, as in the square-N basic tests.
     """
-    K = 3
+    K = 3 if N >= 9 else 2  # a 3x3 kernel's depth 9 does not fit N = 8
     c_in = c_in or max(1, min(4, N // (K * K)))
     D = c_in * K * K
     if D > N:
