@@ -51,6 +51,8 @@ USE_CCACHE ?= 0
 
 # Very large meshes put thousands of PEs into a few generated functions that -Os takes hours on; OPT_FAST=-O0 builds in minutes.
 OPT_FAST ?= -Os
+# Simulation threads; several simulations at once each need fewer (Verilator's threads spin, so oversubscribed runs crawl).
+SIM_THREADS ?= $(shell nproc)
 ifeq ($(USE_CCACHE),0)
 export CCACHE_DISABLE := 1
 endif
@@ -59,7 +61,7 @@ VERILATOR_FLAGS = \
 	--timing \
 	--assert \
 	--top-module $(TOP_MODULE) \
-	--threads $(shell nproc) \
+	--threads $(SIM_THREADS) \
 	--build-jobs $(shell nproc) \
 	--output-split 20000 \
 	--output-split-cfuncs 20000 \
