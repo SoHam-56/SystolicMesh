@@ -158,12 +158,13 @@ clean:
 	-rm -f *.key DVEfiles
 	@echo "-- Clean complete"
 
-regression:
+# One N: every tile size (or REGRESSION_OPTS="--tiles 4 --format bf16 ..."), then the model checks unless --no-checks.
+mesh-regression:
 	@echo "=== SystolicMesh Regression Suite ==="
 	@echo "-- Matrix size : $(MATRIX_SIZE)"
 	@echo "-- Group       : $(REGRESSION_GROUP)"
 	@echo "-- Fast        : $(if $(filter 1,$(FAST)),yes,no)"
-	python3 $(REGRESSION_SCRIPT) \
+	$(PYTHON) $(REGRESSION_SCRIPT) \
 		--matrix-size $(MATRIX_SIZE) \
 		--group $(REGRESSION_GROUP) \
 		$(_FAST_FLAG) \
@@ -177,6 +178,43 @@ aril-narrow:
 	$(MAKE) -C $(PRJ_DIR)/ArithmeticLibrary/Converters/FPNarrow all
 
 model-tests:
-	cd $(PRJ_DIR) && $(PYTHON) test_mesh_model_packed.py && $(PYTHON) test_stim_format.py && $(PYTHON) test_regression_parse.py
+	cd $(PRJ_DIR) && $(PYTHON) test_mesh_model_packed.py && $(PYTHON) test_stim_format.py && $(PYTHON) test_regression_parse.py && $(PYTHON) test_regression_sweep.py
 
-.PHONY: default verilator vcs wave lint debug perf clean regression aril-fpu aril-narrow model-tests
+# make regression: the model checks once, then the mesh at N = 8, 16, 32, 64 (SMALL=1: 8, 16) x every tile size x fp32, bf16, int8
+# (FMT=<f>: one format), each point its own target (make -j runs them side by side), then one table.
+FORMATS = fp32 bf16 int8
+SMALL ?= 0
+ifneq ($(filter-out 0 1,$(SMALL))$(words $(SMALL)),1)
+$(error Invalid SMALL=$(SMALL): must be 0 or 1)
+endif
+ifneq ($(origin FMT),undefined)
+ifneq ($(filter-out $(FORMATS),$(FMT))$(words $(FMT)),1)
+$(error Invalid FMT=$(FMT): must be one of fp32, bf16, int8)
+endif
+endif
+comma := ,
+empty :=
+space := $(empty) $(empty)
+REG_FORMATS = $(subst $(space),$(comma),$(strip $(or $(FMT),$(FORMATS))))
+REG_SELECT  = --formats $(REG_FORMATS)$(if $(filter 1,$(SMALL)), --small)
+REG_DIR    ?= $(TB_DIR)/results/regression
+REG_SUMMARY = $(PYTHON) $(REGRESSION_SCRIPT) --action summary --results $(REG_DIR) $(REG_SELECT)
+ifneq ($(filter regression,$(MAKECMDGOALS)),)
+ifeq ($(origin REG_RUN),undefined)
+REG_RUN := $(shell date +%Y%m%d-%H%M%S)-$(shell echo $$PPID)
+endif
+REG_POINTS := $(shell $(PYTHON) $(REGRESSION_SCRIPT) --action points $(REG_SELECT))
+endif
+
+# One point, e.g. make regression/bf16/N8_T2/mesh: runs in a private copy of the tree, writes $(REG_DIR)/<point>.log and .json.
+regression/%:
+	@$(PYTHON) $(REGRESSION_SCRIPT) --action point --name $* --results $(REG_DIR)$(if $(REG_RUN), --run $(REG_RUN))$(if $(filter regression,$(MAKECMDGOALS)), --keep-going)
+
+regression: $(addprefix regression/,$(REG_POINTS))
+	@$(REG_SUMMARY) --run $(REG_RUN)
+
+# The table of the results already in REG_DIR (SMALL and FMT pick the points it expects); fails on any FAIL or NOT RUN.
+regression-summary:
+	@$(REG_SUMMARY)$(if $(REG_RUN), --run $(REG_RUN))
+
+.PHONY: default verilator vcs wave lint debug perf clean mesh-regression regression regression-summary aril-fpu aril-narrow model-tests

@@ -79,7 +79,7 @@ Multiply-accumulates per cycle do not depend on the clock, so they compare desig
 
 ## Verification
 
-`make regression` generates the stimulus, builds once per tile size, and compares every output with `mesh_model.py`, a bit-exact model of the mesh's arithmetic. Every output matches:
+`make regression` runs every test at every size: 8 × 8, 16 × 16, 32 × 32 and 64 × 64, every tile size each allows, in fp32, bf16 and int8. It generates the stimulus, builds once per tile size, and compares every output with `mesh_model.py`, a bit-exact model of the mesh's arithmetic. Every output matches:
 - 11 matrix-multiply tests and the convolution tests (im2col), 19 to 23 sets each;
 - every tile size;
 - 8 × 8 to 32 × 32 in fp32, bf16 and int8, and 64 × 64 in fp32.
@@ -89,7 +89,7 @@ Before the simulations, the regression checks the models against references of t
 - the `fpNarrow` RTL against those corners and the model on 1.2 million values;
 - `mesh_model.py` against float64 over 640 terms, and the stimulus words (`make model-tests`).
 
-`--no-checks` skips them.
+`make regression` runs these checks once; `mesh-regression` runs them before its simulations, and `--no-checks` skips them there.
 
 Unit benches check a single array, the int8 element and the packed element's skip on their own.
 
@@ -103,12 +103,19 @@ You need Verilator 5 with a C++20 compiler (its `--timing` mode needs coroutines
 git clone --recursive https://github.com/SoHam-56/SystolicMesh.git
 cd SystolicMesh
 
-make regression MATRIX_SIZE=16                                          # fp32, every tile size
-make regression MATRIX_SIZE=32 REGRESSION_OPTS="--format int8 --tiles 4"
-make regression MATRIX_SIZE=16 REGRESSION_OPTS="--format bf16 --collapse-k 0"
+make regression SMALL=1                                                 # every check at N = 8 and 16, all formats
+make regression                                                         # N = 8 to 64 (long: use make -j)
+make mesh-regression MATRIX_SIZE=16                                     # one N in fp32, every tile size
+make mesh-regression MATRIX_SIZE=32 REGRESSION_OPTS="--format int8 --tiles 4"
+make mesh-regression MATRIX_SIZE=16 REGRESSION_OPTS="--format bf16 --collapse-k 0"
 ```
 
-Results go to `testbenches/results/readiness/`. To run one test by hand:
+How `make regression` works:
+- It is a list of *points*: the model checks (`model-tests`, `aril-fpu`, `aril-narrow`), and one per format, N and tile size, e.g. `bf16/N8_T2/mesh`. `python3 regression.py --action points` lists them.
+- Each point is its own make target, so `make -j4 regression SMALL=1` runs four at a time, each simulating on a quarter of the cores; `make regression/bf16/N8_T2/mesh` runs one alone. `FMT=int8` narrows it to one format.
+- Each point runs in a private copy of the tree (so stale stimulus or builds never reach it) and writes its log to `testbenches/results/regression/`. The run ends with one table there, `regression.log`, and fails if any point fails or did not run; `make regression-summary` prints it again.
+
+`mesh-regression`'s results go to `testbenches/results/readiness/`. To run one test by hand:
 
 ```bash
 python3 matmul_tests.py --list                      # or conv_tests.py

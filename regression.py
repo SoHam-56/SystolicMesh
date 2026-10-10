@@ -563,5 +563,77 @@ def main() -> None:
     sys.exit(0 if clean else 1)
 
 
+# ---------------------------------------------------------------------------
+# make regression: the model checks once, then the mesh at every N, tile size and format
+# ---------------------------------------------------------------------------
+
+
+def _engine():
+    """The library's make regression engine, under its own name (SIENNA and GPNAE each have a regression.py too)."""
+    import importlib.util
+    s = importlib.util.spec_from_file_location("aril_regress", os.path.join(ROOT, "ArithmeticLibrary", "Common", "regress.py"))
+    m = importlib.util.module_from_spec(s)
+    s.loader.exec_module(m)
+    return m
+
+
+regress = _engine()
+MODEL_CHECKS = ("model-tests", "aril-fpu", "aril-narrow")  # against their own references, format-independent
+MODEL_TEST_FILES = 4  # model-tests' scripts, each ends 'ALL PASS' or 'ALL <n> PASSED'
+
+
+class MeshSpec(regress.Spec):
+    title = "SYSTOLICMESH REGRESSION"
+    formats = tuple(FORMATS)
+    sized = True
+    drop = ("MATRIX_SIZE", "REGRESSION_GROUP", "FAST", "REGRESSION_OPTS")
+
+    def points(self, small, formats):
+        if not formats:
+            return []
+        return list(MODEL_CHECKS) + [f"{f}/N{n}_T{t}/mesh" for f in formats for n in (regress.SIZES_SMALL if small else regress.SIZES)
+                                     for t in pow2_tile_sizes(n)]
+
+    def parse(self, name):
+        if name in MODEL_CHECKS:
+            return {"n": 0, "kind": name}
+        m = re.fullmatch(r"(\w+)/N(\d+)_T(\d+)/mesh", name)
+        if not m or m.group(1) not in FORMATS or int(m.group(2)) not in regress.SIZES or int(m.group(3)) not in pow2_tile_sizes(int(m.group(2))):
+            raise ValueError(f"{name}: points are {', '.join(MODEL_CHECKS)} and <fmt>/N<n>_T<t>/mesh (N 8, 16, 32 or 64, T a power-of-2 divisor)")
+        return {"n": int(m.group(2)), "tile": int(m.group(3)), "fmt": m.group(1), "kind": "mesh"}
+
+    def argv(self, name, opts):
+        p = self.parse(name)
+        if p["kind"] != "mesh":
+            return ["make", p["kind"]] + ([f"PYTHON={sys.executable}"] if p["kind"] == "model-tests" else [])
+        return ["make", "mesh-regression", f"MATRIX_SIZE={p['n']}",
+                f"REGRESSION_OPTS=--format {p['fmt']} --collapse-k 1 --tiles {p['tile']} --no-checks", f"PYTHON={sys.executable}"]
+
+    def verdict(self, name, text, rc):
+        v = regress.common_verdict(text, rc)
+        if v:
+            return v
+        text = regress.ANSI.sub("", text)
+        if name == "model-tests":
+            n = len(re.findall(r"^ALL (?:PASS|\d+ PASSED)$", text, re.M))
+            return "PASS" if n == MODEL_TEST_FILES else f"FAIL ({n} of {MODEL_TEST_FILES} model test files passed)"
+        if name == "aril-fpu":
+            return regress.marker_verdict(text, rc, (r"^RESULT: PASSED",), (r"RESULT: FAILED",))
+        if name == "aril-narrow":
+            return regress.marker_verdict(text, rc, (r"^RESULT: PASSED", r"^bad_format OK:", r"^fpNarrow lint \(MAN_W 7, 23\): 0 warnings, 0 errors$"),
+                                          (r"RESULT: FAILED",))
+        s, m = re.findall(r"^\s*Simulations\s*:\s*(\d+)\s*$", text, re.M), re.findall(r"^\s*Passed\s*:\s*(\d+)\s*$", text, re.M)
+        if not s or not m or "Sanity Clean" not in text:
+            return "FAIL (no 'Simulations : X', 'Passed : X' with Sanity Clean)"
+        x, y = int(m[-1]), int(s[-1])
+        return "PASS" if x == y > 0 else f"FAIL ({x} of {y} simulations passed)"
+
+
+SPEC = MeshSpec(ROOT, os.path.join(ROOT, "testbenches", "results", "regression"))
+
+
 if __name__ == "__main__":
-    main()
+    if "--action" in sys.argv[1:]:  # make regression's points, one point, the table
+        regress.main(SPEC)
+    else:
+        main()
