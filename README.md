@@ -82,7 +82,7 @@ Multiply-accumulates per cycle do not depend on the clock, so they compare desig
 `make regression` runs every test at every size: 8 × 8, 16 × 16, 32 × 32 and 64 × 64, every tile size each allows, in fp32, bf16 and int8. It generates the stimulus, builds once per tile size, and compares every output with `mesh_model.py`, a bit-exact model of the mesh's arithmetic. Every output matches:
 - 11 matrix-multiply tests and the convolution tests (im2col), 19 to 23 sets each;
 - every tile size;
-- 8 × 8 to 32 × 32 in fp32, bf16 and int8, and 64 × 64 in fp32.
+- 8 × 8 to 32 × 32 in fp32, bf16 and int8 at every tile size; 64 × 64 in fp32 at every tile size, and in bf16 and int8 at tile size 16 (their other 64 × 64 tile sizes not yet run).
 
 Before the simulations, the regression checks the models against references of their own, so a rounding bug shared by the RTL and `mesh_model.py` still fails:
 - the fp32-to-bf16 rounding model against hand-derived corners and an integer round-to-nearest-even;
@@ -113,7 +113,7 @@ make mesh-regression MATRIX_SIZE=16 REGRESSION_OPTS="--format bf16 --collapse-k 
 How `make regression` works:
 - It is a list of *points*: the model checks (`model-tests`, `aril-fpu`, `aril-narrow`), and one per format, N and tile size, e.g. `bf16/N8_T2/mesh`. `python3 regression.py --action points` lists them.
 - Each point is its own make target, so `make -j4 regression SMALL=1` runs four at a time, each simulating on a quarter of the cores; `make regression/bf16/N8_T2/mesh` runs one alone. `FMT=int8` narrows it to one format.
-- Each point runs in a private copy of the tree (so stale stimulus or builds never reach it) and writes its log to `testbenches/results/regression/`. The run ends with one table there, `regression.log`, and fails if any point fails or did not run; `make regression-summary` prints it again.
+- Each point runs in a private copy of the working tree, git's files without ignored outputs (so stale stimulus or builds never reach it) and writes its log to `testbenches/results/regression/`. The run ends with one table there, `regression.log`, and fails if any point fails or did not run; `make regression-summary` prints it again.
 
 - Run times, measured on 8-core machines: `SMALL=1` takes about 22 minutes one point at a time and 11 minutes with `make -j4` on one machine; a 64 × 64 point takes up to an hour (fp32, tile size 16: 57 minutes).
 

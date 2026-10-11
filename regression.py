@@ -563,9 +563,7 @@ def main() -> None:
     sys.exit(0 if clean else 1)
 
 
-# ---------------------------------------------------------------------------
-# make regression: the model checks once, then the mesh at every N, tile size and format
-# ---------------------------------------------------------------------------
+# ── make regression: the model checks once, then the mesh at every N, tile size and format ──
 
 
 def _engine():
