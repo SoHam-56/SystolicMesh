@@ -42,9 +42,8 @@ TESTBENCH = $(TOP_MODULE).sv
 VERILATOR_DIR = $(PRJ_DIR)/Verilator
 VCS_DIR = $(PRJ_DIR)/VCS
 
-# Waveforms cost ~100 extra translation units and dominate build time. TRACE=0 skips
-# them; `make wave` needs TRACE=1, which is the default.
-TRACE ?= 1
+# Waveforms cost ~100 extra translation units and dominate build time: TRACE=1 writes TB_SystolicMesh.vcd, the default 0 none; `make wave` builds with TRACE=1.
+TRACE ?= 0
 
 # ccache 3.7 here served corrupted objects that segfaulted at start-up; USE_CCACHE=1 opts back in.
 USE_CCACHE ?= 0
@@ -62,6 +61,7 @@ VERILATOR_FLAGS = \
 	--assert \
 	--top-module $(TOP_MODULE) \
 	--threads $(SIM_THREADS) \
+	-j $(shell nproc) \
 	--build-jobs $(shell nproc) \
 	--output-split 20000 \
 	--output-split-cfuncs 20000 \
@@ -77,7 +77,7 @@ VERILATOR_FLAGS = \
 	--Wno-WIDTHCONCAT
 
 ifeq ($(TRACE),1)
-VERILATOR_FLAGS += --trace
+VERILATOR_FLAGS += --trace -DENABLE_TRACE
 endif
 
 # LARGE_CODE=1: the large code model, for a binary past 2 GB (collapse-k 0 at N = 64: regression.py sets it there).
@@ -98,7 +98,7 @@ VCS_FLAGS = \
 	+v2k \
 	+incdir+$(SRC_DIR) \
 	+incdir+$(TB_DIR) \
-	+define+VCS
+	+define+VCS$(if $(filter 1,$(TRACE)), +define+ENABLE_TRACE)
 
 default: verilator
 
@@ -120,7 +120,7 @@ verilator:
 	@echo "-- Running Verilator simulation"
 	cd $(VERILATOR_DIR) && $(shell command -v stdbuf >/dev/null && echo stdbuf -oL) ./$(TOP_MODULE)_sim $(SIM_ARGS)  # line-buffered, so a crash log shows how far it got; SIM_ARGS go to the simulator
 	@echo "-- Verilator simulation complete"
-	@echo "-- Trace file (TRACE=1): $(VERILATOR_DIR)/$(TOP_MODULE).vcd"
+	@$(if $(filter 1,$(TRACE)),echo "-- Trace file: $(VERILATOR_DIR)/$(TOP_MODULE).vcd",true)
 
 vcs:
 	@echo "=== VCS simulation for Systolic Array ==="
@@ -134,6 +134,7 @@ vcs:
 	@echo "-- VCS simulation complete"
 
 wave:
+	@[ -f $(VERILATOR_DIR)/$(TOP_MODULE).vcd ] || $(MAKE) verilator TRACE=1  # no dump yet: build with waveforms and run
 	@if [ -f $(VERILATOR_DIR)/$(TOP_MODULE).vcd ]; then \
 		echo "-- Opening WAVE"; \
 		$(WAVE) $(VERILATOR_DIR)/$(TOP_MODULE).vcd; \

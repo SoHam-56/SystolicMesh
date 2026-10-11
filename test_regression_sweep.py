@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """make regression's list, commands and verdicts: the model checks once, the mesh at every N, tile size and format (collapse-k 1)."""
 import os
+import re
 import subprocess
 import sys
 
@@ -42,6 +43,15 @@ def test_commands():
     big = subprocess.run(["make", "-s", "-n", "verilator", "LARGE_CODE=1"], cwd=ROOT, capture_output=True, text=True, env=env).stdout
     assert "-CFLAGS -mcmodel=large -CFLAGS -fno-pie -LDFLAGS -no-pie" in big, big[-300:]
     assert "mcmodel" not in subprocess.run(["make", "-s", "-n", "verilator"], cwd=ROOT, capture_output=True, text=True, env=env).stdout
+    pe = lambda n: reg.regress.point_env(reg.SPEC, n, "s", 8)
+    assert "OPT_FAST" not in pe("fp32/N8_T2/mesh") and "OPT_FAST" not in pe("int8/N16_T4/mesh-ck0") and pe("bf16/N32_T8/mesh")["OPT_FAST"] == "-O0"  # -O0 only from N = 32: below it the long mesh simulations lose more than the build gains (rs1_spd_mesh)
+    make_n = lambda *a: subprocess.run(["make", "-s", "-n", *a], cwd=ROOT, capture_output=True, text=True, env=env).stdout
+    cores = reg.regress._cores()
+    assert f"-j {cores} --build-jobs {cores} " in make_n("verilator"), "Verilator takes every core"
+    assert "--trace" not in make_n("verilator") and "--trace -DENABLE_TRACE" in make_n("verilator", "TRACE=1")  # no waveform by default
+    assert "verilator TRACE=1" in make_n("wave"), "make wave builds with TRACE=1"
+    tb = open(os.path.join(ROOT, "testbenches", "TB_SystolicMesh.sv")).read()
+    assert re.search(r"`ifdef ENABLE_TRACE\s+\$dumpfile\([^)]*\);\s+\$dumpvars\([^)]*\);\s+`endif", tb), "the TB dumps only in a TRACE=1 build"
 
 
 def test_verdicts():

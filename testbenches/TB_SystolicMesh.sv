@@ -833,8 +833,10 @@ module TB_SystolicMesh #(
 
   // ── Top-level stimulus ────────────────────────────────────────────────────
   initial begin
+`ifdef ENABLE_TRACE
     $dumpfile("TB_SystolicMesh.vcd");
     $dumpvars(0, TB_SystolicMesh);
+`endif
     if (!$value$plusargs("res_slots=%d", res_slots)) res_slots = (BEATS < RES_CAP) ? BEATS : RES_CAP;
     if (!$value$plusargs("stall_pct=%d", stall_pct)) stall_pct = 0;
     if (res_slots < 1 || res_slots > RES_CAP) begin
