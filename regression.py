@@ -69,6 +69,7 @@ FMT, COLLAPSE = "fp32", 1  # set from --format and --collapse-k
 # Paths
 # ---------------------------------------------------------------------------
 ROOT = os.path.dirname(os.path.abspath(__file__))
+MATRIX_N = 0  # this run's N, set in main
 STIM_DIR = os.path.join(ROOT, "testbenches", "stimulus")
 RESULTS_DIR = os.path.join(ROOT, "testbenches", "results", "readiness")
 
@@ -150,11 +151,16 @@ def _make() -> tuple:
       - only .mem changed → simulate directly, no recompile
     """
     t0 = time.time()
-    r = subprocess.run(["make"], cwd=ROOT, capture_output=True, text=True)
+    r = subprocess.run(["make", *make_args(MATRIX_N, COLLAPSE)], cwd=ROOT, capture_output=True, text=True)
     out = r.stdout + r.stderr
     if r.returncode != 0:
         out += f"\nBUILDFAIL: make exited {r.returncode}\n"
     return out, time.time() - t0
+
+
+def make_args(n: int, ck: int) -> list:
+    """The build's make variables: the large code model where the binary passes 2 GB (collapse-k 0 at N = 64)."""
+    return ["LARGE_CODE=1"] if ck == 0 and n >= 64 else []
 
 
 # Make targets checked against their own references, not mesh_model's agreement with the RTL (a bug shared by both passes that).
@@ -430,8 +436,8 @@ def main() -> None:
     parser.add_argument("--no-checks", action="store_true",
                         help="skip the model checks (make aril-fpu, aril-narrow, model-tests); SIENNA's gate runs them as steps")
     args = parser.parse_args()
-    global FMT, COLLAPSE
-    FMT, COLLAPSE = args.format, args.collapse_k
+    global FMT, COLLAPSE, MATRIX_N
+    FMT, COLLAPSE, MATRIX_N = args.format, args.collapse_k, args.matrix_size
     stim_format.configure(FMT, 2, COLLAPSE)
 
     N = args.matrix_size
@@ -589,23 +595,23 @@ class MeshSpec(regress.Spec):
     def points(self, small, formats):
         if not formats:
             return []
-        return list(MODEL_CHECKS) + [f"{f}/N{n}_T{t}/mesh" for f in formats for n in (regress.SIZES_SMALL if small else regress.SIZES)
-                                     for t in pow2_tile_sizes(n)]
+        return list(MODEL_CHECKS) + [f"{f}/N{n}_T{t}/{k}" for f in formats for n in (regress.SIZES_SMALL if small else regress.SIZES)
+                                     for t in pow2_tile_sizes(n) for k in ("mesh", "mesh-ck0")]
 
     def parse(self, name):
         if name in MODEL_CHECKS:
             return {"n": 0, "kind": name}
-        m = re.fullmatch(r"(\w+)/N(\d+)_T(\d+)/mesh", name)
+        m = re.fullmatch(r"(\w+)/N(\d+)_T(\d+)/mesh(-ck0)?", name)
         if not m or m.group(1) not in FORMATS or int(m.group(2)) not in regress.SIZES or int(m.group(3)) not in pow2_tile_sizes(int(m.group(2))):
             raise ValueError(f"{name}: points are {', '.join(MODEL_CHECKS)} and <fmt>/N<n>_T<t>/mesh (N 8, 16, 32 or 64, T a power-of-2 divisor)")
-        return {"n": int(m.group(2)), "tile": int(m.group(3)), "fmt": m.group(1), "kind": "mesh"}
+        return {"n": int(m.group(2)), "tile": int(m.group(3)), "fmt": m.group(1), "kind": "mesh", "ck": 0 if m.group(4) else 1}
 
     def argv(self, name, opts):
         p = self.parse(name)
         if p["kind"] != "mesh":
             return ["make", p["kind"]] + ([f"PYTHON={sys.executable}"] if p["kind"] == "model-tests" else [])
         return ["make", "mesh-regression", f"MATRIX_SIZE={p['n']}",
-                f"REGRESSION_OPTS=--format {p['fmt']} --collapse-k 1 --tiles {p['tile']} --no-checks", f"PYTHON={sys.executable}"]
+                f"REGRESSION_OPTS=--format {p['fmt']} --collapse-k {p['ck']} --tiles {p['tile']} --no-checks", f"PYTHON={sys.executable}"]
 
     def verdict(self, name, text, rc):
         v = regress.common_verdict(text, rc)

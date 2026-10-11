@@ -17,9 +17,12 @@ def test_points():
     sweep = lambda pts: sorted({(reg.SPEC.parse(p)["n"], reg.SPEC.parse(p)["tile"]) for p in pts[3:]})
     assert sweep(small) == [(8, 2), (8, 4), (8, 8), (16, 2), (16, 4), (16, 8), (16, 16)], sweep(small)
     assert sweep(full) == sweep(small) + [(32, t) for t in (2, 4, 8, 16, 32)] + [(64, t) for t in (2, 4, 8, 16, 32, 64)], sweep(full)
-    assert len(small) == len(set(small)) == 3 + 7 * 3 and len(full) == len(set(full)) == 3 + 18 * 3, (len(small), len(full))
+    assert len(small) == len(set(small)) == 3 + 7 * 3 * 2 and len(full) == len(set(full)) == 3 + 18 * 3 * 2, (len(small), len(full))
+    for f in reg.FORMATS:  # collapse-k 1 and 0 at every N and tile size
+        assert [p.rsplit("/", 1)[1] for p in full if p.startswith(f"{f}/N64_T2/")] == ["mesh", "mesh-ck0"], f
+    assert [reg.SPEC.parse(p)["ck"] for p in ("fp32/N8_T2/mesh", "fp32/N8_T2/mesh-ck0")] == [1, 0]
     assert reg.SPEC.points(True, ["int8"]) == CHECKS + [p for p in small if p.startswith("int8/")] and reg.SPEC.points(False, []) == []
-    for bad in ("fp32/N8_T16/mesh", "fp16/N8_T2/mesh", "fp32/N12_T4/mesh", "fp32/model-tests", "fp32/N8_T2/pipeline", "nosuch"):
+    for bad in ("fp32/N8_T16/mesh", "fp16/N8_T2/mesh", "fp32/N12_T4/mesh", "fp32/model-tests", "fp32/N8_T2/pipeline", "fp32/N8_T2/mesh-ck2", "nosuch"):
         try:
             reg.SPEC.parse(bad)
         except ValueError:
@@ -31,7 +34,14 @@ def test_commands():
     py = sys.executable
     assert reg.SPEC.argv("bf16/N32_T8/mesh", None) == ["make", "mesh-regression", "MATRIX_SIZE=32",
                                                        "REGRESSION_OPTS=--format bf16 --collapse-k 1 --tiles 8 --no-checks", f"PYTHON={py}"]
+    assert reg.SPEC.argv("int8/N64_T4/mesh-ck0", None) == ["make", "mesh-regression", "MATRIX_SIZE=64",
+                                                           "REGRESSION_OPTS=--format int8 --collapse-k 0 --tiles 4 --no-checks", f"PYTHON={py}"]
     assert reg.SPEC.argv("model-tests", None) == ["make", "model-tests", f"PYTHON={py}"] and reg.SPEC.argv("aril-narrow", None)[:2] == ["make", "aril-narrow"]
+    assert [reg.make_args(n, ck) for n, ck in ((64, 0), (64, 1), (32, 0))] == [["LARGE_CODE=1"], [], []]  # a collapse-k 0 N = 64 binary passes 2 GB
+    env = {k: x for k, x in os.environ.items() if not k.startswith("MAKE")}
+    big = subprocess.run(["make", "-s", "-n", "verilator", "LARGE_CODE=1"], cwd=ROOT, capture_output=True, text=True, env=env).stdout
+    assert "-CFLAGS -mcmodel=large -CFLAGS -fno-pie -LDFLAGS -no-pie" in big, big[-300:]
+    assert "mcmodel" not in subprocess.run(["make", "-s", "-n", "verilator"], cwd=ROOT, capture_output=True, text=True, env=env).stdout
 
 
 def test_verdicts():

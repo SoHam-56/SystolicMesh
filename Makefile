@@ -80,6 +80,12 @@ ifeq ($(TRACE),1)
 VERILATOR_FLAGS += --trace
 endif
 
+# LARGE_CODE=1: the large code model, for a binary past 2 GB (collapse-k 0 at N = 64: regression.py sets it there).
+LARGE_CODE ?= 0
+ifeq ($(LARGE_CODE),1)
+VERILATOR_FLAGS += -CFLAGS -mcmodel=large -CFLAGS -fno-pie -LDFLAGS -no-pie
+endif
+
 # One-off defines, e.g. EXTRA_FLAGS=-DASSERT_SELFTEST
 VERILATOR_FLAGS += $(EXTRA_FLAGS)
 
