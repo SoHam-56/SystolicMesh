@@ -158,7 +158,7 @@ clean:
 	-rm -f *.key DVEfiles
 	@echo "-- Clean complete"
 
-# One N: every tile size (or REGRESSION_OPTS="--tiles 4 --format bf16 ..."), then the model checks unless --no-checks.
+# One N: the model checks unless --no-checks, then every tile size (or REGRESSION_OPTS="--tiles 4 --format bf16 ...").
 mesh-regression:
 	@echo "=== SystolicMesh Regression Suite ==="
 	@echo "-- Matrix size : $(MATRIX_SIZE)"
@@ -180,23 +180,24 @@ aril-narrow:
 model-tests:
 	cd $(PRJ_DIR) && $(PYTHON) test_mesh_model_packed.py && $(PYTHON) test_stim_format.py && $(PYTHON) test_regression_parse.py && $(PYTHON) test_regression_sweep.py
 
-# make regression: the model checks once, then the mesh at N = 8, 16, 32, 64 (SMALL=1: 8, 16) x every tile size x fp32, bf16, int8
-# (FMT=<f>: one format), each point its own target (make -j runs them side by side), then one table.
+# make regression: the model checks once, the mesh at N 8-64 (SMALL=1: 8, 16) x every tile size x format; one target per point, then one table.
 FORMATS = fp32 bf16 int8
-SMALL ?= 0
-ifneq ($(filter-out 0 1,$(SMALL))$(words $(SMALL)),1)
+# Only SMALL= and FMT= on make's command line narrow it, not exported ones.
+REG_SMALL = $(if $(filter command line,$(origin SMALL)),$(SMALL),0)
+REG_FMT   = $(if $(filter command line,$(origin FMT)),$(FMT))
+ifneq ($(filter-out 0 1,$(REG_SMALL))$(words $(REG_SMALL)),1)
 $(error Invalid SMALL=$(SMALL): must be 0 or 1)
 endif
-ifneq ($(origin FMT),undefined)
-ifneq ($(filter-out $(FORMATS),$(FMT))$(words $(FMT)),1)
+ifneq ($(REG_FMT),)
+ifneq ($(filter-out $(FORMATS),$(REG_FMT))$(words $(REG_FMT)),1)
 $(error Invalid FMT=$(FMT): must be one of fp32, bf16, int8)
 endif
 endif
 comma := ,
 empty :=
 space := $(empty) $(empty)
-REG_FORMATS = $(subst $(space),$(comma),$(strip $(or $(FMT),$(FORMATS))))
-REG_SELECT  = --formats $(REG_FORMATS)$(if $(filter 1,$(SMALL)), --small)
+REG_FORMATS = $(subst $(space),$(comma),$(strip $(or $(REG_FMT),$(FORMATS))))
+REG_SELECT  = --formats $(REG_FORMATS)$(if $(filter 1,$(REG_SMALL)), --small)
 REG_DIR    ?= $(TB_DIR)/results/regression
 REG_SUMMARY = $(PYTHON) $(REGRESSION_SCRIPT) --action summary --results $(REG_DIR) $(REG_SELECT)
 ifneq ($(filter regression,$(MAKECMDGOALS)),)

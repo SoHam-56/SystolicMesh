@@ -63,6 +63,10 @@ def test_regression_target():
     one = run("regression/fp32/N8_T2/mesh").stdout.splitlines()
     assert len(one) == 1 and "--keep-going" not in one[0] and "--run" not in one[0], one
     assert run("regression", "SMALL=2").returncode != 0 and run("regression", "FMT=fp16").returncode != 0
+    for extra in ({"FMT": "int8"}, {"SMALL": "1"}, {"FMT": "fp16", "SMALL": "2"}):  # exported, they do not narrow it: only make's command line does
+        r = subprocess.run(["make", "-s", "-n", "regression", f"PYTHON={sys.executable}"], cwd=ROOT, capture_output=True, text=True, env=dict(env, **extra))
+        names = [x.split("--name ")[1].split()[0] for x in r.stdout.splitlines() if "--action point " in x]
+        assert r.returncode == 0 and names == reg.SPEC.points(False, list(reg.FORMATS)), (extra, r.stderr[-200:], len(names))
     r = run("mesh-regression", "MATRIX_SIZE=32", "REGRESSION_OPTS=--tiles 8")  # one N, as before: every tile size, or --tiles
     assert r.returncode == 0 and all(x in r.stdout for x in ("regression.py", "--matrix-size 32", "--group all", "--tiles 8")), r.stdout
 
