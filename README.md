@@ -115,6 +115,8 @@ How `make regression` works:
 - Each point is its own make target, so `make -j4 regression SMALL=1` runs four at a time, each simulating on a quarter of the cores; `make regression/bf16/N8_T2/mesh` runs one alone. `FMT=int8` narrows it to one format.
 - Each point runs in a private copy of the tree (so stale stimulus or builds never reach it) and writes its log to `testbenches/results/regression/`. The run ends with one table there, `regression.log`, and fails if any point fails or did not run; `make regression-summary` prints it again.
 
+- Run times, measured on 8-core machines: `SMALL=1` takes about 22 minutes one point at a time and 11 minutes with `make -j4` on one machine; a 64 × 64 point takes up to an hour (fp32, tile size 16: 57 minutes).
+
 `mesh-regression`'s results go to `testbenches/results/readiness/`. To run one test by hand:
 
 ```bash
