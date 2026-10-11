@@ -220,6 +220,38 @@ module TB_SystolicMesh #(
     end
   end
 
+  // ── Truth dump: each result's sums as the reducers write them (before fpNarrow) beside its words, for regression.py's true-function gate ──
+  localparam int TPD = MATRIX_SIZE / TILE_SIZE;  // output tiles per dimension, one reducer each
+  logic [TPD*TPD-1:0] tr_we;
+  logic [TPD*TPD-1:0][31:0] tr_addr;
+  logic [TPD*TPD-1:0][ACC_W-1:0] tr_sum;
+  for (genvar ti = 0; ti < TPD; ti++) begin : TR_ROW
+    for (genvar tj = 0; tj < TPD; tj++) begin : TR_COL
+      assign tr_we[ti*TPD+tj]   = dut.sram_we_agg[ti*TPD+tj];
+      assign tr_addr[ti*TPD+tj] = dut.sram_addr_agg[ti*TPD+tj];
+      if (EXP_W == 8 && MAN_W == 7) begin : G_BF16  // bf16: the fp32 sum going into the reducer's fpNarrow
+        assign tr_sum[ti*TPD+tj] = dut.ROW[ti].COL[tj].acc_unit.G_NARROW.NARROW.x_i;
+      end else begin : G_SAME  // fp32 and int8 write the sum itself
+        assign tr_sum[ti*TPD+tj] = ACC_W'(dut.sram_data_agg[ti*TPD+tj]);
+      end
+    end
+  end
+  logic [ACC_W-1:0] sum_store[MAX_RES][SRAM_SIZE];  // per result in write order: each element's sum
+  int sum_n[SRAM_SIZE];  // results written so far, per element
+  integer tr_fd;
+  initial tr_fd = $fopen("truth_dump.txt", "w");
+  initial forever begin  // one writer, on the falling edge, as the result consumer
+    @(negedge clk);
+    if (!rstn) sum_n = '{default: 0};
+    else
+      for (int t = 0; t < TPD * TPD; t++)
+        if (tr_we[t]) begin
+          automatic int e = int'(tr_addr[t]) % SRAM_SIZE;
+          if (sum_n[e] < MAX_RES) sum_store[sum_n[e]][e] = tr_sum[t];
+          sum_n[e]++;
+        end
+  end
+
   // ── Reset ─────────────────────────────────────────────────────────────────
   task apply_reset();
     begin
@@ -368,6 +400,10 @@ module TB_SystolicMesh #(
         $display("    [FAIL]     Result %0d pushed with packed=%0b, the set was put with packed=%0b", res_next, res_pk[res_next],
                  put_pk[res_next]);
         err_count++;
+      end
+      if (tr_fd && res_next < MAX_RES) begin
+        $fwrite(tr_fd, "R %s %0d\n", filename, res_next);
+        for (i = 0; i < SRAM_SIZE; i++) $fwrite(tr_fd, "%h %h\n", sum_store[res_next][i], res_store[res_next][i]);
       end
       res_next++;
 
@@ -855,7 +891,7 @@ module TB_SystolicMesh #(
              OUT_W);
     $display(" Result link:    %0d words per beat, %0d beats per set, %0d slots, %0d%% stalls", WIDE_READ, BEATS, res_slots,
              stall_pct);
-    $display(" Compare:        bit-exact against mesh_model");
+    $display(" Compare:        bit-exact against mesh_model (a diagnostic, still required); regression.py gates on the true function");
     $display("----------------------------------------------");
 
     begin
@@ -906,6 +942,7 @@ module TB_SystolicMesh #(
     if (sets_failed == 0 && res_bad == 0) $display(" RESULT: SUCCESS");
     else $display(" RESULT: FAILURE");
 
+    if (tr_fd) $fclose(tr_fd);
     $finish;
   end
 

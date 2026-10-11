@@ -58,9 +58,14 @@ import sys
 import time
 from datetime import datetime
 
+import numpy as np
+
 from conv_tests import CONV_NUM_SETS, CONV_TESTS
 from matmul_tests import MATMUL_NUM_SETS, MATMUL_TESTS, pow2_tile_sizes
 import stim_format
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ArithmeticLibrary", "Common", "models"))
+import truth  # noqa: E402  AriL's true-function gate: the mesh's sums against the float64 sum of its operands
 
 FORMATS = {"fp32": (8, 23), "bf16": (8, 7), "int8": (0, 7)}
 FMT, COLLAPSE = "fp32", 1  # set from --format and --collapse-k
@@ -71,6 +76,7 @@ FMT, COLLAPSE = "fp32", 1  # set from --format and --collapse-k
 ROOT = os.path.dirname(os.path.abspath(__file__))
 MATRIX_N = 0  # this run's N, set in main
 STIM_DIR = os.path.join(ROOT, "testbenches", "stimulus")
+TRUTH_DUMP = os.path.join(ROOT, "Verilator", "truth_dump.txt")  # TB_SystolicMesh's sums and words of every result it checked
 RESULTS_DIR = os.path.join(ROOT, "testbenches", "results", "readiness")
 
 # ---------------------------------------------------------------------------
@@ -234,6 +240,77 @@ def _parse(raw: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# True-function gate: each result's sums against the float64 sum of the operands the mesh received
+# ---------------------------------------------------------------------------
+
+
+def _words(path: str) -> np.ndarray:
+    with open(path) as fh:
+        return np.array([int(t, 16) for t in fh.read().split()], dtype=np.int64)
+
+
+def _operands(stim: str, name: str, N: int) -> tuple:
+    """(passes, bias words or None) of the result checked against expected file name: matrixC<sfx>.mem or accC.mem."""
+    f = lambda n: os.path.join(stim, n)
+    if name == "accC.mem":
+        passes, p = [], 0
+        while os.path.exists(f(f"accA_{p}.mem")):
+            passes.append((_words(f(f"accA_{p}.mem")).reshape(N, N), _words(f(f"accB_{p}.mem")).reshape(N, N)))
+            p += 1
+        bias = _words(f("accBias.mem")) if os.path.exists(f("accBias.mem")) else None
+        return passes, bias
+    m = re.fullmatch(r"matrixC(_\d+)?\.mem", name)
+    if not m:
+        raise ValueError(f"truth dump: unknown expected file {name}")
+    sfx = m.group(1) or ""
+    A, B = _words(f(f"matrixA{sfx}.mem")).reshape(N, N), _words(f(f"matrixB{sfx}.mem")).reshape(N, N)
+    if os.path.exists(f(f"packShift{sfx}.mem")):  # a packed set sums each block alone: the PEs skip off-block weights
+        b = N >> int(_words(f(f"packShift{sfx}.mem"))[0])
+        B = np.where(np.kron(np.eye(N // b), np.ones((b, b))).astype(bool), B, 0)
+    bias = _words(f(f"matrixBias{sfx}.mem")) if os.path.exists(f(f"matrixBias{sfx}.mem")) else None
+    return [(A, B)], bias
+
+
+def truth_gate(dump: str, stim: str, N: int, fmt: str) -> dict:
+    """{stage: Result} over every result in the dump: matmul on the sums before narrowing, and in bf16 narrow on (sum, word) pairs."""
+    if not os.path.exists(dump):
+        raise RuntimeError(f"no truth dump at {dump}")
+    tok = open(dump).read().split("\n")
+    out, cache, i = {"matmul": [], "narrow": []}, {}, 0
+    while i < len(tok):
+        if not tok[i].startswith("R "):
+            i += 1
+            continue
+        name = tok[i].split()[1]
+        rows = [ln.split() for ln in tok[i + 1:i + 1 + N * N]]
+        if len(rows) != N * N or any(len(r) != 2 for r in rows):
+            raise RuntimeError(f"truth dump: result '{tok[i]}' holds {len(rows)} of {N * N} element lines")
+        pre = np.array([int(r[0], 16) for r in rows], dtype=np.int64).reshape(N, N)
+        post = np.array([int(r[1], 16) for r in rows], dtype=np.int64)
+        if name not in cache:
+            cache[name] = _operands(stim, name, N)
+        passes, bias = cache[name]
+        out["matmul"].append(truth.gate_matmul(fmt, passes, pre, bias))
+        if fmt == "bf16":
+            out["narrow"].append(truth.gate_narrow("bf16", pre.ravel(), post))
+        i += 1 + N * N
+    if not out["matmul"]:
+        raise RuntimeError(f"truth dump {dump} holds no result")
+    return {k: truth.merge(v) for k, v in out.items() if v}
+
+
+def truth_lines(res: dict) -> tuple:
+    """(lines, misses): a stage line per gate, and a [FAIL] line per stage that misses."""
+    lines, bad = [], []
+    for k, r in res.items():
+        lines.append("        " + truth.stage_line(r))
+        if not r.ok:
+            w = f"{r.worst_lsb} ULP" if k == "narrow" else truth.worst_text(r.worst) + " of sum|ab|"
+            bad.append(f"[FAIL] truth: {k} {w}, {r.over} of {r.n} over the bound; first (index, out, true[, sum|ab|]): {r.first[:3]}")
+    return lines, bad
+
+
+# ---------------------------------------------------------------------------
 # Console helpers
 # ---------------------------------------------------------------------------
 
@@ -283,6 +360,8 @@ def _run_group(
             os.makedirs(STIM_DIR, exist_ok=True)
             test["gen_fn"](STIM_DIR, N)
             stim_format.check_widths(STIM_DIR)
+            if os.path.exists(TRUTH_DUMP):
+                os.remove(TRUTH_DUMP)  # a stale dump would be gated as this test's
 
             # make: compiles TB on first call (TB timestamp changed),
             #       skips compile on all subsequent calls (no RTL change)
@@ -292,6 +371,16 @@ def _run_group(
             if parsed["status"] == "PASS" and test.get("expect", "") not in raw:  # a stage the test needs never ran
                 parsed["status"] = "FAIL"
                 print(err(f"[FAIL] '{test['expect']}' is not in the log"), end="  ")
+            tres = {}
+            if parsed["status"] in ("PASS", "FAIL"):  # the TB ran to its summary: gate what it dumped
+                try:
+                    tres = truth_gate(TRUTH_DUMP, STIM_DIR, N, FMT)
+                    tl, tbad = truth_lines(tres)
+                except (RuntimeError, ValueError, OSError) as e:
+                    tl, tbad = [], [f"[FAIL] truth: none ({e})"]
+                raw += "\n".join(["", "TRUE-FUNCTION GATE (truth.py; the bit-exact compare above is a diagnostic, still required):"] + tl + tbad) + "\n"
+                if tbad:
+                    parsed["status"] = "FAIL"
             log_name = f"{test['name']}_N{N}_T{tile}.log"
             os.makedirs(RESULTS_DIR, exist_ok=True)
             with open(os.path.join(RESULTS_DIR, log_name), "w") as fh:
@@ -304,10 +393,13 @@ def _run_group(
                 N=N,
                 wall=wall,
                 log=log_name,
+                truth=tres,
                 **parsed,
             )
             results.append(r)
             _print_result(r)
+            for ln in [x for x in raw.splitlines() if x.startswith(("        TRUTH ", "[FAIL] truth:"))]:
+                print(f"      {ln.strip()}")
             if "BUILDFAIL" in raw:  # the next test would rebuild the same config and fail the same way
                 for rest in tests[idx + 1:]:
                     results.append(dict(name=rest["name"], group=rest.get("group", ""), tile=tile, N=N, wall=0.0,
@@ -375,6 +467,17 @@ def _report(results: list, N: int, fast: bool, group: str, checks: list) -> str:
     _rows("Matrix multiplication", [r for r in results if r["group"] == "matmul"])
     _rows("Convolution", [r for r in results if r["group"] == "conv"])
 
+    L.append("-" * W)
+    L.append("TRUE-FUNCTION GATE PER TEST (matmul: worst |err| / sum|ab| of the sums; narrow: worst ULP; misses of all elements)")
+    L.append("-" * W)
+    for r in results:
+        t = r.get("truth") or {}
+        mm, nw = t.get("matmul"), t.get("narrow")
+        L.append(f"{r['name']:<22}{'T=' + str(r['tile']):>6}  "
+                 + (f"matmul {truth.worst_text(mm.worst):>9} {mm.over:>5} of {mm.n:<7}" if mm else "matmul not gated")
+                 + (f"  narrow {nw.worst_lsb} ULP {nw.over} of {nw.n}" if nw else ""))
+    L.append("")
+
     if checks:
         L.append("-" * W)
         L.append("MODEL CHECKS (own references: hand corners, an integer RNE, float64)")
@@ -386,7 +489,8 @@ def _report(results: list, N: int, fast: bool, group: str, checks: list) -> str:
     L.append("NOTES")
     L.append("-" * W)
     L.append("* TB patched once per (tile x group); make handles incremental compilation")
-    L.append("* Compare: bit-exact against mesh_model (matmul in the float formats, matmul_int in int8)")
+    L.append("* Gate: truth.py, the sums before narrowing within max(1% of sum|ab|, 2^-126) of the float64 sum of the operands; bf16 narrowing exact")
+    L.append("* Compare: bit-exact against mesh_model (matmul in the float formats, matmul_int in int8), a diagnostic that is still required")
     L.append(f"* Format: {FMT}  |  collapse-k {COLLAPSE}")
     L.append("* Tool: Verilator  |  Clock: 10 ns")
     L.append("=" * W)
@@ -552,6 +656,12 @@ def main() -> None:
     for t, v in checks:
         print(f"  {ok('PASS') if v == 'PASS' else err('FAIL')}  {'make ' + t:<28}  [model check{'' if v == 'PASS' else ', ' + v}]")
 
+    gated = [r for r in all_results if r.get("truth")]
+    for k in ("matmul", "narrow"):
+        m = truth.merge([r["truth"].get(k) for r in gated])
+        if m:
+            print(f"  {truth.stage_line(m)}")
+    print(f"  TRUTH: {len(gated)} simulations gated, {sum(not all(x.ok for x in r['truth'].values()) for r in gated)} with misses")
     if total == 0:  # finishing cleanly with nothing simulated is not a pass
         print(err(f"  FAIL: no simulation ran (group {args.group}, tiles {tiles}, format {FMT}, collapse-k {COLLAPSE})"))
     clean = total > 0 and passed == total and all(v == "PASS" for _, v in checks)
@@ -627,8 +737,14 @@ class MeshSpec(regress.Spec):
             return regress.marker_verdict(text, rc, (r"^RESULT: PASSED", r"^bad_format OK:", r"^fpNarrow lint \(MAN_W 7, 23\): 0 warnings, 0 errors$"),
                                           (r"RESULT: FAILED",))
         s, m = re.findall(r"^\s*Simulations\s*:\s*(\d+)\s*$", text, re.M), re.findall(r"^\s*Passed\s*:\s*(\d+)\s*$", text, re.M)
+        g = re.findall(r"^\s*TRUTH: (\d+) simulations gated, (\d+) with misses$", text, re.M)
+        miss = sorted(set(re.findall(r"^\s*\[FAIL\] truth: (\w+)", text, re.M)))
+        if miss:
+            return f"FAIL (true function: {', '.join(miss)} misses in {g[-1][1] if g else '?'} simulations)"
         if not s or not m or "Sanity Clean" not in text:
             return "FAIL (no 'Simulations : X', 'Passed : X' with Sanity Clean)"
+        if not g or int(g[-1][0]) != int(s[-1]):
+            return f"FAIL ({g[-1][0] if g else 0} of {s[-1]} simulations gated on the true function)"
         x, y = int(m[-1]), int(s[-1])
         return "PASS" if x == y > 0 else f"FAIL ({x} of {y} simulations passed)"
 
