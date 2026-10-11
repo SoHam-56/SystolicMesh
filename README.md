@@ -104,7 +104,7 @@ git clone --recursive https://github.com/SoHam-56/SystolicMesh.git
 cd SystolicMesh
 
 make regression SMALL=1                                                 # every check at N = 8 and 16, all formats
-make regression                                                         # N = 8 to 64 (long: use make -j)
+make regression                                                         # N = 8 to 64 (long: use make -jN, N for the memory, below)
 make mesh-regression MATRIX_SIZE=16                                     # one N in fp32, every tile size
 make mesh-regression MATRIX_SIZE=32 REGRESSION_OPTS="--format int8 --tiles 4"
 make mesh-regression MATRIX_SIZE=16 REGRESSION_OPTS="--format bf16 --collapse-k 0"
