@@ -117,13 +117,18 @@ def test_truth_int8_exact_and_wrap():
     from matmul_tests import gen_mm_random
     stim, N = _gen("int8", (gen_mm_random,)), 8
     rows = _model_rows(stim, "int8")
-    res = reg.truth_gate(_dump(stim, N, [r for r in rows if r[0] != "matrixC_1.mem"]), stim, N, "int8")
+    res = reg.truth_gate(_dump(stim, N, rows), stim, N, "int8")
     assert res["matmul"].ok and res["matmul"].worst == 0.0, truth_text(res)
-    # set 1's bias sits within 4096 of INT32_MAX: the mesh's int32 sums wrap, the true sums do not
-    res = reg.truth_gate(_dump(stim, N, [r for r in rows if r[0] == "matrixC_1.mem"]), stim, N, "int8")
-    passes, bias = reg._operands(stim, "matrixC_1.mem", N)
+    # set 1's bias sits within 4096 of INT32_MAX: its sums past int32 wrap, as the int32 accumulator's contract says, and pass
+    name, pre, post = next(r for r in rows if r[0] == "matrixC_1.mem")
+    passes, bias = reg._operands(stim, name, N)
     t, _ = reg.truth.matmul_ref([tuple(reg.truth.values("int8", m) for m in passes[0])], reg.truth.values("int32", bias))
-    assert not res["matmul"].ok and res["matmul"].over == int((t > 2**31 - 1).sum()) > 0, truth_text(res)
+    past = (t > 2**31 - 1).ravel()
+    assert past.sum() > 0 and res["matmul"].n_ovf == int(past.sum()), (int(past.sum()), truth_text(res))
+    # the same sums saturated at INT32_MAX instead of wrapped fail, element for element
+    sat = np.where(past, 2**31 - 1, reg.truth.values("int32", pre)).astype(np.int64) & 0xFFFFFFFF
+    res = reg.truth_gate(_dump(stim, N, [(name, sat, sat)]), stim, N, "int8")
+    assert not res["matmul"].ok and res["matmul"].over == int(past.sum()), truth_text(res)
 
 
 def test_truth_verdict():
