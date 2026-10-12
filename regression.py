@@ -306,7 +306,8 @@ def truth_lines(res: dict) -> tuple:
         lines.append("        " + truth.stage_line(r))
         if not r.ok:
             w = f"{r.worst_lsb} ULP" if k == "narrow" else truth.worst_text(r.worst) + " of sum|ab|"
-            bad.append(f"[FAIL] truth: {k} {w}, {r.over} of {r.n} over the bound; first (index, out, true[, sum|ab|]): {r.first[:3]}")
+            how = "index, fp32 sum, word, round to nearest even" if k == "narrow" else "index, sum, true sum, sum|ab|"
+            bad.append(f"[FAIL] truth: {k} {w}, {r.over} of {r.n} over the bound; first ({how}): {r.first[:3]}")
     return lines, bad
 
 
