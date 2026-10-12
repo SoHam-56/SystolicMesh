@@ -55,9 +55,11 @@ def test_commands():
 
 
 def test_verdicts():
-    mesh = "  Simulations : 12\n  Passed      : \x1b[92m12\x1b[0m\n  Verdict : ✅  All tests passed — Sanity Clean\n"
+    mesh = ("  Simulations : 12\n  Passed      : \x1b[92m12\x1b[0m\n  TRUTH: 12 simulations gated, 0 with misses\n"
+            "  Verdict : ✅  All tests passed — Sanity Clean\n")
     v = lambda p, t, rc=0: reg.SPEC.verdict(p, t, rc)
     assert v("fp32/N8_T2/mesh", mesh) == "PASS" and v("fp32/N8_T2/mesh", mesh, 1) == "FAIL (exit 1)"
+    assert v("fp32/N8_T2/mesh", mesh.replace("  TRUTH: 12 simulations gated, 0 with misses\n", "")) == "FAIL (0 of 12 simulations gated on the true function)"
     assert v("fp32/N8_T2/mesh", mesh.replace("\x1b[92m12", "\x1b[92m11")) == "FAIL (11 of 12 simulations passed)"
     assert v("fp32/N8_T2/mesh", mesh.replace("12", "0")) == "FAIL (0 of 0 simulations passed)"
     assert v("fp32/N8_T2/mesh", "Simulations : 3\n") == "FAIL (no 'Simulations : X', 'Passed : X' with Sanity Clean)"
