@@ -131,6 +131,19 @@ def test_truth_int8_exact_and_wrap():
     assert not res["matmul"].ok and res["matmul"].over == int(past.sum()), truth_text(res)
 
 
+def test_truth_int8_drop_kills_every_affected_element():
+    from matmul_tests import gen_mm_random
+    stim, N = _gen("int8", (gen_mm_random,)), 8
+    rows = _model_rows(stim, "int8")
+    for name, pre, post in rows:
+        passes, _ = reg._operands(stim, name, N)
+        A, B = (reg.truth.values("int8", m) for m in passes[0])
+        term = np.outer(A[:, 0], B[0, :]).ravel().astype(np.int64)  # the first product of every PE
+        bad = (reg.truth.values("int32", pre).astype(np.int64) - term) & 0xFFFFFFFF
+        res = reg.truth_gate(_dump(stim, N, [(name, bad, bad)]), stim, N, "int8")
+        assert res["matmul"].over == int((term != 0).sum()) > 0, (name, int((term != 0).sum()), truth_text(res))
+
+
 def test_truth_verdict():
     log = ("  Simulations : 2\n  Passed      : 2\n  TRUTH: 2 simulations gated, 0 with misses\nAll tests passed — Sanity Clean\n")
     assert reg.SPEC.verdict("fp32/N8_T2/mesh", log, 0) == "PASS"
@@ -144,7 +157,7 @@ def truth_text(res):
     return "; ".join(reg.truth.stage_line(r) for r in res.values())
 
 
-MIN_TESTS = 9  # tests this file holds; fewer run means one was lost, which is a failure
+MIN_TESTS = 10  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
