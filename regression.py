@@ -53,6 +53,7 @@ Exit code: 0 = all pass, 1 = any failure or interrupted.
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -391,6 +392,9 @@ def _run_group(
                     tl, tbad = truth_lines(tres)
                 except (RuntimeError, ValueError, OSError) as e:
                     tl, tbad = [], [f"[FAIL] truth: none ({e})"]
+                if os.path.exists(TRUTH_DUMP):  # kept beside the log, so a run's sums can be judged again offline
+                    os.makedirs(RESULTS_DIR, exist_ok=True)
+                    shutil.copy(TRUTH_DUMP, os.path.join(RESULTS_DIR, f"{test['name']}_N{N}_T{tile}_truth_dump.txt"))
                 raw += "\n".join(["", "TRUE-FUNCTION GATE (truth.py; the bit-exact compare above is a diagnostic, still required):"] + tl + tbad) + "\n"
                 if tbad:
                     parsed["status"] = "FAIL"
