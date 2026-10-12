@@ -77,7 +77,7 @@ def test_truth_passes_the_model_and_fails_a_dropped_product():
             rows = _model_rows(stim, fmt)
             res = reg.truth_gate(_dump(stim, N, rows), stim, N, fmt)
             assert res["matmul"].ok and res["matmul"].n == N * N * len(rows), (fmt, gens, truth_text(res))
-            assert (fmt == "bf16") == ("narrow" in res) and all(r.ok for r in res.values()), (fmt, gens, truth_text(res))
+            assert (fmt == "bf16") == ("narrow" in res) != ("transfer" in res) and all(r.ok for r in res.values()), (fmt, gens, truth_text(res))
             # set 0 without its first product, A[:, 0] B[0, :]
             name, pre, post = rows[0]
             passes, _ = reg._operands(stim, name, N)
@@ -131,6 +131,18 @@ def test_truth_int8_exact_and_wrap():
     assert not res["matmul"].ok and res["matmul"].over == int(past.sum()), truth_text(res)
 
 
+def test_truth_transfer_fails_a_changed_word():
+    from matmul_tests import gen_mm_random
+    for fmt in ("fp32", "int8"):
+        stim, N = _gen(fmt, (gen_mm_random,)), 8
+        rows = _model_rows(stim, fmt)
+        name, pre, post = rows[0]
+        post = post.copy()
+        post[[3, 5]] = post[[5, 3]]  # two delivered words swapped: the sums are right, the words are not
+        res = reg.truth_gate(_dump(stim, N, [(name, pre, post)] + rows[1:]), stim, N, fmt)
+        assert res["matmul"].ok and not res["transfer"].ok and res["transfer"].over == (2 if pre[3] != pre[5] else 0), truth_text(res)
+
+
 def test_truth_int8_drop_kills_every_affected_element():
     from matmul_tests import gen_mm_random
     stim, N = _gen("int8", (gen_mm_random,)), 8
@@ -157,7 +169,7 @@ def truth_text(res):
     return "; ".join(reg.truth.stage_line(r) for r in res.values())
 
 
-MIN_TESTS = 10  # tests this file holds; fewer run means one was lost, which is a failure
+MIN_TESTS = 11  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]

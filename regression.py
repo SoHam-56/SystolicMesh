@@ -271,12 +271,21 @@ def _operands(stim: str, name: str, N: int) -> tuple:
     return [(A, B)], bias
 
 
+def transfer(fmt: str, written, delivered) -> "truth.Result":
+    """fp32 and int8 write each sum as its word: the word the result link delivers must be that sum, exactly."""
+    written, delivered = np.asarray(written, dtype=np.int64).ravel(), np.asarray(delivered, dtype=np.int64).ravel()
+    bad = np.flatnonzero(written != delivered)
+    return truth.Result(bad.size == 0, fmt, "transfer", int(written.size), float(bad.size), 0.0, int(bad[0]) if bad.size else 0,
+                        int(bad.size), int(bad.size), 0, 0, 0, [(int(k), int(written[k]), int(delivered[k])) for k in bad[:truth.FIRST]])
+
+
 def truth_gate(dump: str, stim: str, N: int, fmt: str) -> dict:
-    """{stage: Result} over every result in the dump: matmul on the sums before narrowing, and in bf16 narrow on (sum, word) pairs."""
+    """{stage: Result} over every result in the dump: matmul on the sums before narrowing, then bf16 narrow on (sum, word) pairs,
+    fp32 and int8 transfer (the delivered word is the sum written)."""
     if not os.path.exists(dump):
         raise RuntimeError(f"no truth dump at {dump}")
     tok = open(dump).read().split("\n")
-    out, cache, i = {"matmul": [], "narrow": []}, {}, 0
+    out, cache, i = {"matmul": [], "narrow": [], "transfer": []}, {}, 0
     while i < len(tok):
         if not tok[i].startswith("R "):
             i += 1
@@ -293,6 +302,8 @@ def truth_gate(dump: str, stim: str, N: int, fmt: str) -> dict:
         out["matmul"].append(truth.gate_matmul(fmt, passes, pre, bias))
         if fmt == "bf16":
             out["narrow"].append(truth.gate_narrow("bf16", pre.ravel(), post))
+        else:
+            out["transfer"].append(transfer(fmt, pre, post))
         i += 1 + N * N
     if not out["matmul"]:
         raise RuntimeError(f"truth dump {dump} holds no result")
@@ -305,8 +316,9 @@ def truth_lines(res: dict) -> tuple:
     for k, r in res.items():
         lines.append("        " + truth.stage_line(r))
         if not r.ok:
-            w = f"{r.worst_lsb} ULP" if k == "narrow" else truth.worst_text(r.worst) + " of sum|ab|"
-            how = "index, fp32 sum, word, round to nearest even" if k == "narrow" else "index, sum, true sum, sum|ab|"
+            w = {"narrow": f"{r.worst_lsb} ULP", "transfer": f"{r.over} words differ"}.get(k, truth.worst_text(r.worst) + " of sum|ab|")
+            how = {"narrow": "index, fp32 sum, word, round to nearest even", "transfer": "index, sum written, word delivered"}.get(
+                k, "index, sum, true sum, sum|ab|")
             bad.append(f"[FAIL] truth: {k} {w}, {r.over} of {r.n} over the bound; first ({how}): {r.first[:3]}")
     return lines, bad
 
@@ -490,7 +502,8 @@ def _report(results: list, N: int, fast: bool, group: str, checks: list) -> str:
     L.append("NOTES")
     L.append("-" * W)
     L.append("* TB patched once per (tile x group); make handles incremental compilation")
-    L.append("* Gate: truth.py, the sums before narrowing within max(1% of sum|ab|, 2^-126) of the float64 sum of the operands; bf16 narrowing exact")
+    L.append("* Gate: truth.py, the sums before narrowing within max(1% of sum|ab|, 2^-126) of the float64 sum of the operands (int8: exact, int32-wrapped);"
+             " bf16 narrowing exact; fp32 and int8 delivered words equal to the sums written")
     L.append("* Compare: bit-exact against mesh_model (matmul in the float formats, matmul_int in int8), a diagnostic that is still required")
     L.append(f"* Format: {FMT}  |  collapse-k {COLLAPSE}")
     L.append("* Tool: Verilator  |  Clock: 10 ns")
@@ -658,7 +671,7 @@ def main() -> None:
         print(f"  {ok('PASS') if v == 'PASS' else err('FAIL')}  {'make ' + t:<28}  [model check{'' if v == 'PASS' else ', ' + v}]")
 
     gated = [r for r in all_results if r.get("truth")]
-    for k in ("matmul", "narrow"):
+    for k in ("matmul", "narrow", "transfer"):
         m = truth.merge([r["truth"].get(k) for r in gated])
         if m:
             print(f"  {truth.stage_line(m)}")
