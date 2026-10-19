@@ -33,6 +33,8 @@ What makes it fast:
 ## Performance
 
 > All numbers are measured in cycle-accurate Verilator simulation. Times assume a **950 MHz** clock, the frequency the published TYTAN activation engine of the same project reached in a 45 nm process ([SIENNA](https://github.com/SoHam-56/SIENNA#publication)). Synthesis is planned.
+>
+> The figures were measured on 2026-10-05 (SystolicMesh e4a840a). The mesh's RTL has not changed since, but the 32 × 32 and 64 × 64 figures and the throughput inside SIENNA are measured again in the final sweep after the planned restructure.
 
 **How latency is measured.** The testbench counts cycles from the start pulse to the result written to the result bank. For one set at N = 16, T = 4:
 
