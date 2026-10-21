@@ -5,23 +5,19 @@
 module SystolicArray #(
     parameter int N           = 4,
     parameter int K           = N,  // depth of the product; N for a square tile
-    parameter int EXP_W       = 8,   // the build's format: fp32 8/23 by default, bf16 8/7, int8 0/7
-    parameter int MAN_W       = 23,
-    parameter int DATA_WIDTH  = 1 + EXP_W + MAN_W,  // operands
-    parameter int ACC_W       = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // partial sums: int32 in int8, fp32 in every float format
     parameter int WEST_WORDS  = K,  // A words per write: one row of A
     parameter int NORTH_WORDS = N,  // B words per write: one row of B
     parameter int BANKS       = 3,  // sets whose partials the PEs hold at once
-    parameter int U           = (K < sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1) ? K : sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1,  // partial sums per pixel, combined by the reader
+    parameter int U           = (K < sienna_fmt_pkg::ADD_LATENCY + 1) ? K : sienna_fmt_pkg::ADD_LATENCY + 1,  // partial sums per pixel, combined by the reader
     parameter int COL0        = 0   // mesh column of this tile's column 0, for packed blocks
 ) (
     input logic clk_i,
     input logic rstn_i,
 
     input logic                                   north_write_enable_i,
-    input logic [NORTH_WORDS-1:0][DATA_WIDTH-1:0]       north_write_data_i,
+    input logic [NORTH_WORDS-1:0][sienna_fmt_pkg::DATA_WIDTH-1:0] north_write_data_i,
     input logic                                   west_write_enable_i,
-    input logic [ WEST_WORDS-1:0][DATA_WIDTH-1:0]       west_write_data_i,
+    input logic [ WEST_WORDS-1:0][sienna_fmt_pkg::DATA_WIDTH-1:0] west_write_data_i,
     input logic                                   commit_i,      // the operands just written form a pass: queue it
     input logic                                   commit_fresh_i,  // with commit_i: the pass starts a set
     input logic                                   commit_more_i,   // with commit_i: another pass of the same set follows
@@ -32,11 +28,13 @@ module SystolicArray #(
     output logic                               next_final_o,   // so is the one after it, for a reader about to release
     input  logic                               read_enable_i,
     input  logic [          $clog2(N*N)-1:0]   read_addr_i,
-    output logic [U-1:0][ACC_W-1:0]            read_data_o,    // the pixel's U partial sums, one cycle later
+    output logic [U-1:0][sienna_fmt_pkg::ACC_DATA_WIDTH-1:0] read_data_o,    // the pixel's U partial sums, one cycle later
     output logic                               read_valid_o,
     input  logic                               release_i,      // the reader is done with the oldest final set
     output logic                               busy_o          // a set is loaded, feeding or unread
 );
+  localparam int DATA_WIDTH = sienna_fmt_pkg::DATA_WIDTH;  // operands
+  localparam int ACC_DATA_WIDTH = sienna_fmt_pkg::ACC_DATA_WIDTH;  // partial sums
   localparam int AD = N * K;  // A and B each hold N*K words per bank
   localparam int BW = (BANKS > 1) ? $clog2(BANKS) : 1;
   localparam int KW = (K > 1) ? $clog2(K) : 1;
@@ -181,7 +179,7 @@ module SystolicArray #(
   logic [DATA_WIDTH-1:0] b_n[N+1][N];  // b_n[r][c] enters PE(r,c) from the north
   logic v_w[N][N+1], f_w[N][N+1], m_w[N][N+1];  // valid and pass flags travel east with A
   logic [2:0] p_w[N][N+1];  // pack shift travels east with A
-  logic [U-1:0][ACC_W-1:0] part[N][N];
+  logic [U-1:0][ACC_DATA_WIDTH-1:0] part[N][N];
   logic [BANKS-1:0] pe_final[N*N];
   logic [BW-1:0] rb;  // oldest unread accumulator bank
 

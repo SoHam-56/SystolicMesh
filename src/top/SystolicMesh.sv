@@ -3,11 +3,6 @@
 module SystolicMesh #(
     parameter MATRIX_SIZE = 32,
     parameter TILE_SIZE   = 4,
-    parameter EXP_W       = 8,   // the build's format: fp32 8/23 by default, bf16 8/7, int8 0/7
-    parameter MAN_W       = 23,
-    parameter DATA_WIDTH  = 1 + EXP_W + MAN_W,  // operands: host writes, staging banks, weight cache
-    parameter ACC_W       = sienna_fmt_pkg::acc_w(EXP_W, MAN_W),  // sums and bias: int32 in int8, fp32 in every float format
-    parameter OUT_W       = sienna_fmt_pkg::out_w(EXP_W, MAN_W),  // result words: int32 in int8, the format's own width in floats
     parameter WIDE_READ   = 1,  // words per wide result read, one per consumer lane
     parameter HOST_WORDS  = MATRIX_SIZE,  // words per host write, one matrix row; must divide MATRIX_SIZE*MATRIX_SIZE
     parameter COLLAPSE_K  = 1,  // 1: one full-depth tile per output tile, N^2 PEs and no reduce; 0: depth slices and the reduce tree
@@ -22,16 +17,16 @@ module SystolicMesh #(
     input logic clk_i,
     input logic rstn_i,
     credit_link_if.consumer staging,  // L1: a put per set, data {wc_last, weight_tile, weight_cached, pack_shift[2:0], bias_valid, partial}
-    input logic [MATRIX_SIZE-1:0][ACC_W-1:0]      bias_i,  // with the put: add bias_i[c] to every element of column c (float builds: fp32 bits, the caller widens)
+    input logic [MATRIX_SIZE-1:0][sienna_fmt_pkg::ACC_DATA_WIDTH-1:0] bias_i,  // with the put: add bias_i[c] to every element of column c, at the accumulator's width (the caller widens)
     credit_link_if.consumer wc_region[2],  // L2: a put opens a fill of that region; its credit returns once the fill's last set is broadcast
     input logic                                  wc_write_enable_i,  // cache write of north_write_data_i at word wc_write_addr_i
     input logic [WCAW-1:0]                       wc_write_addr_i,
 
     input logic                  north_write_enable_i,
-    input logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] north_write_data_i,
+    input logic [HOST_WORDS-1:0][sienna_fmt_pkg::DATA_WIDTH-1:0] north_write_data_i,
     input logic                  north_write_reset_i,
     input logic                  west_write_enable_i,
-    input logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] west_write_data_i,
+    input logic [HOST_WORDS-1:0][sienna_fmt_pkg::DATA_WIDTH-1:0] west_write_data_i,
     input logic                  west_write_reset_i,
 
     output logic north_queue_empty_o,
@@ -41,6 +36,9 @@ module SystolicMesh #(
     credit_link_if.producer result  // L3: N*N/WIDE_READ beats per result, data {packed, last, first, WIDE_READ words}
 );
 
+  localparam int DATA_WIDTH = sienna_fmt_pkg::DATA_WIDTH;  // operands: host writes, staging banks, weight cache
+  localparam int ACC_DATA_WIDTH = sienna_fmt_pkg::ACC_DATA_WIDTH;  // sums and bias
+  localparam int RESULT_DATA_WIDTH = sienna_fmt_pkg::RESULT_DATA_WIDTH;  // result words, as the reducers write them
   localparam TILES_PER_DIM = MATRIX_SIZE / TILE_SIZE;
   localparam GLOBAL_ELEMENTS = MATRIX_SIZE * MATRIX_SIZE;
   localparam TILE_ELEMENTS = TILE_SIZE * TILE_SIZE;
@@ -60,11 +58,7 @@ module SystolicMesh #(
   logic [$clog2(GLOBAL_ELEMENTS):0] ptr_A, ptr_B;
 `ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
   initial if ((GLOBAL_ELEMENTS % HOST_WORDS) != 0) $error("SystolicMesh: HOST_WORDS (%0d) must divide %0d", HOST_WORDS, GLOBAL_ELEMENTS);
-  initial if (DATA_WIDTH != 1 + EXP_W + MAN_W) $error("SystolicMesh: DATA_WIDTH %0d is not 1 + EXP_W + MAN_W", DATA_WIDTH);
 `endif
-  if (OUT_W != sienna_fmt_pkg::out_w(EXP_W, MAN_W)) begin : G_BAD_OUT_W  // the result banks and link would truncate or pad silently
-    $fatal(1, "SystolicMesh: OUT_W=%0d is not sienna_fmt_pkg::out_w(%0d, %0d)", OUT_W, EXP_W, MAN_W);
-  end
   logic [1:0] in_full;  // per staging bank: a started set not yet broadcast
   logic in_wr, in_rd;  // bank the host writes, bank BROADCAST reads
   logic in_room;  // the bank the host writes is free; a host holding a staging credit always finds it so
@@ -166,7 +160,7 @@ module SystolicMesh #(
 
   // ── Broadcast: copy a full staging bank into every array's free operand bank, one tile row per cycle ──
   localparam int AK = COLLAPSE_K ? MATRIX_SIZE : TILE_SIZE;  // depth of each array's product
-  localparam int ADD_LAT = sienna_fmt_pkg::add_lat(EXP_W, MAN_W);
+  localparam int ADD_LAT = sienna_fmt_pkg::add_latency(ACC_DATA_WIDTH);  // the PEs' and reducers' fmt_add
   localparam int U = (AK < ADD_LAT + 1) ? AK : ADD_LAT + 1;  // partial sums per array pixel: the adder latency plus one
   localparam int RPU = RP * U;  // partials the reducer sums per pixel
   localparam int BIAS_Q = 1 << $clog2(4 + ACC_BANKS + 1);  // sets between start and reduce: staging, operand and partial-sum banks
@@ -272,11 +266,11 @@ module SystolicMesh #(
   // ── Bias queue: sums reach the reducers in the order they were started ──
   logic bias_push;
   assign bias_push = start_accept && !last_partial;
-  logic [ACC_W-1:0] bias_q[BIAS_Q][MATRIX_SIZE];
+  logic [ACC_DATA_WIDTH-1:0] bias_q[BIAS_Q][MATRIX_SIZE];
   logic [BIAS_Q-1:0] bias_qv;
   logic [$clog2(BIAS_Q)-1:0] bq_wr, bq_rd;
   logic [$clog2(BIAS_Q):0] bq_n;
-  logic [MATRIX_SIZE-1:0][ACC_W-1:0] red_bias;  // bias of the set the reducers are starting
+  logic [MATRIX_SIZE-1:0][ACC_DATA_WIDTH-1:0] red_bias;  // bias of the set the reducers are starting
   always_comb begin
     for (int c = 0; c < MATRIX_SIZE; c++) red_bias[c] = bias_qv[bq_rd] ? bias_q[bq_rd][c] : '0;
   end
@@ -363,7 +357,7 @@ module SystolicMesh #(
 
   logic [NUM_TILES-1:0]                 sram_we_agg;
   logic [NUM_TILES-1:0][          31:0] sram_addr_agg;
-  logic [NUM_TILES-1:0][     OUT_W-1:0] sram_data_agg;
+  logic [NUM_TILES-1:0][     RESULT_DATA_WIDTH-1:0] sram_data_agg;
   logic [NUM_TILES-1:0][          31:0] sram_addr_bank;
 
   always_comb
@@ -371,11 +365,11 @@ module SystolicMesh #(
 
   // ── L3: the oldest result goes out as BEATS wide beats, one read a cycle while a credit is held past this cycle's put ──
   // Beat i word k is element k * BEATS + i; packed, it is column k % N of row (k / N) * BEATS + i, so a lane holds a column block.
-  localparam int RES_W = WIDE_READ * OUT_W + 3;
+  localparam int RES_W = WIDE_READ * RESULT_DATA_WIDTH + 3;
   logic [$clog2(BEATS + 1)-1:0] pb_idx;  // next beat of the oldest result to read
   logic res_rd, rq_first, rq_pk;
   logic [$clog2(RES_MAX + 1)-1:0] res_cnt;  // result credits held
-  logic [WIDE_READ-1:0][OUT_W-1:0] res_words;
+  logic [WIDE_READ-1:0][RESULT_DATA_WIDTH-1:0] res_words;
   credit_counter #(.MAX(RES_MAX), .CRW(RES_CRW)) res_cc (.clk_i(clk_i), .rstn_i(rstn_i), .put_i(res_put), .credit_i(result.credit),
                                                         .has_credit_o(), .count_o(res_cnt));
   assign res_rd = out_full[out_rd] && (int'(pb_idx) < BEATS) && (int'(res_cnt) > int'(res_put));
@@ -419,7 +413,7 @@ module SystolicMesh #(
 
   MeshOutputSram #(
       .DEPTH(RESULT_BANKS * GLOBAL_ELEMENTS),
-      .DATA_WIDTH(OUT_W),
+      .DATA_WIDTH(RESULT_DATA_WIDTH),
       .NUM_PORTS(NUM_TILES),
       .WIDE(WIDE_READ)
   ) output_mem (
@@ -435,9 +429,9 @@ module SystolicMesh #(
   );
 
   // Per output tile: U partials from each depth slice, flattened for its reducer.
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][RPU-1:0][ACC_W-1:0] t_data;
+  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][RPU-1:0][ACC_DATA_WIDTH-1:0] t_data;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] t_ren;
-  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][ACC_W-1:0] t_bias;  // the bias of the pixel being summed
+  logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][ACC_DATA_WIDTH-1:0] t_bias;  // the bias of the pixel being summed
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][$clog2(TILE_ELEMENTS)-1:0] t_addr;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] r_ready, r_busy, r_read_done, r_written;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] a_ready, a_final, a_next, a_busy;
@@ -508,14 +502,10 @@ module SystolicMesh #(
             assign a_next[i][j][k]  = 1'b1;
             assign a_busy[i][j][k]  = 1'b0;
           end else begin : S
-            logic [U-1:0][ACC_W-1:0] rd;
+            logic [U-1:0][ACC_DATA_WIDTH-1:0] rd;
             SystolicArray #(
                 .N(TILE_SIZE),
                 .K(AK),
-                .EXP_W(EXP_W),
-                .MAN_W(MAN_W),
-                .DATA_WIDTH(DATA_WIDTH),
-                .ACC_W(ACC_W),
                 .WEST_WORDS(LW),
                 .NORTH_WORDS(LW),
                 .U(U),
