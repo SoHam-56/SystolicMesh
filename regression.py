@@ -49,7 +49,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "Ari
 import truth  # noqa: E402  AriL's true-function gate: the mesh's sums against the float64 sum of its operands
 
 FORMATS = ("fp32", "bf16", "int8")  # make's FMT: the build's define
-FMT, COLLAPSE = "fp32", 1  # set from --format and --collapse-k
+FMT, COLLAPSE, HELD = "fp32", 1, 0  # set from --format, --collapse-k and --held-accum
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -83,7 +83,7 @@ hdr = lambda s: f"{_O}{_B}{s}{_X}"
 def _make(tile: int, num_sets: int) -> tuple:
     """Runs `make` in the project root for one configuration; returns (stdout and stderr, wall seconds). Verilator rebuilds only on a new configuration."""
     t0 = time.time()
-    r = subprocess.run(["make", *build_args(FMT, MATRIX_N, tile, num_sets, COLLAPSE)], cwd=ROOT, capture_output=True, text=True)
+    r = subprocess.run(["make", *build_args(FMT, MATRIX_N, tile, num_sets, COLLAPSE, HELD)], cwd=ROOT, capture_output=True, text=True)
     out = r.stdout + r.stderr
     if r.returncode != 0:
         out += f"\nBUILDFAIL: make exited {r.returncode}\n"
@@ -95,9 +95,10 @@ def make_args(n: int, ck: int) -> list:
     return ["LARGE_CODE=1"] if ck == 0 and n >= 64 else []
 
 
-def build_args(fmt: str, n: int, tile: int, num_sets: int, ck: int) -> list:
-    """make's variables for one configuration: the define (FMT), TB_SystolicMesh's sizes as -G overrides, and make_args."""
-    return [f"FMT={fmt}", f"MATRIX_SIZE={n}", f"TILE_SIZE={tile}", f"NUM_TEST_SETS={num_sets}", f"COLLAPSE_K={ck}", *make_args(n, ck)]
+def build_args(fmt: str, n: int, tile: int, num_sets: int, ck: int, held: int = 0) -> list:
+    """make's variables for one configuration: the define (FMT), TB_SystolicMesh's sizes as -G overrides, the held stage, and make_args."""
+    return [f"FMT={fmt}", f"MATRIX_SIZE={n}", f"TILE_SIZE={tile}", f"NUM_TEST_SETS={num_sets}", f"COLLAPSE_K={ck}",
+            *([f"HELD_ACCUM={held}"] if held else []), *make_args(n, ck)]
 
 
 # Make targets checked against their own references, not mesh_model's agreement with the RTL (a bug shared by both passes that).
@@ -470,11 +471,12 @@ def main() -> None:
                         help="number format of the build; every format compares bit for bit against mesh_model")
     parser.add_argument("--collapse-k", type=int, choices=[0, 1], default=1,
                         help="1: full-depth arrays (the RTL default); 0: depth slices and the reduce tree")
+    parser.add_argument("--held-accum", action="store_true", help="also TB_SystolicMesh's held accumulate stage (HELD_ACCUM = 1)")
     parser.add_argument("--no-checks", action="store_true",
                         help="skip the model checks (make aril-fpu, aril-narrow, model-tests); SIENNA's gate runs them as steps")
     args = parser.parse_args()
-    global FMT, COLLAPSE, MATRIX_N
-    FMT, COLLAPSE, MATRIX_N = args.format, args.collapse_k, args.matrix_size
+    global FMT, COLLAPSE, MATRIX_N, HELD
+    FMT, COLLAPSE, MATRIX_N, HELD = args.format, args.collapse_k, args.matrix_size, int(args.held_accum)
     stim_format.configure(FMT, 2, COLLAPSE)
 
     N = args.matrix_size
@@ -621,28 +623,34 @@ class MeshSpec(regress.Spec):
     title = "SYSTOLICMESH REGRESSION"
     formats = tuple(FORMATS)
     sized = True
-    drop = ("MATRIX_SIZE", "TILE_SIZE", "NUM_TEST_SETS", "COLLAPSE_K", "REGRESSION_GROUP", "FAST", "REGRESSION_OPTS")
+    drop = ("MATRIX_SIZE", "TILE_SIZE", "NUM_TEST_SETS", "COLLAPSE_K", "HELD_ACCUM", "REGRESSION_GROUP", "FAST", "REGRESSION_OPTS")
+    held = (8, 16), (2, 4)  # mesh-held: collapse-k 0 where K = T < ADD_LATENCY + 1 in floats, the back-to-back pass hazard's reach
 
     def points(self, small, formats):
         if not formats:
             return []
-        return list(MODEL_CHECKS) + [f"{f}/N{n}_T{t}/{k}" for f in formats for n in (regress.SIZES_SMALL if small else regress.SIZES)
-                                     for t in pow2_tile_sizes(n) for k in ("mesh", "mesh-ck0")]
+        return (list(MODEL_CHECKS) + [f"{f}/N{n}_T{t}/{k}" for f in formats for n in (regress.SIZES_SMALL if small else regress.SIZES)
+                                      for t in pow2_tile_sizes(n) for k in ("mesh", "mesh-ck0")]
+                + [f"{f}/N{n}_T{t}/mesh-held" for f in formats for n in self.held[0] for t in self.held[1]])
 
     def parse(self, name):
         if name in MODEL_CHECKS:
             return {"n": 0, "kind": name}
-        m = re.fullmatch(r"(\w+)/N(\d+)_T(\d+)/mesh(-ck0)?", name)
+        m = re.fullmatch(r"(\w+)/N(\d+)_T(\d+)/mesh(-ck0|-held)?", name)
         if not m or m.group(1) not in FORMATS or int(m.group(2)) not in regress.SIZES or int(m.group(3)) not in pow2_tile_sizes(int(m.group(2))):
             raise ValueError(f"{name}: points are {', '.join(MODEL_CHECKS)} and <fmt>/N<n>_T<t>/mesh (N 8, 16, 32 or 64, T a power-of-2 divisor)")
-        return {"n": int(m.group(2)), "tile": int(m.group(3)), "fmt": m.group(1), "kind": "mesh", "ck": 0 if m.group(4) else 1}
+        held = m.group(4) == "-held"
+        if held and (int(m.group(2)) not in self.held[0] or int(m.group(3)) not in self.held[1]):
+            raise ValueError(f"{name}: mesh-held points are N {self.held[0]}, T {self.held[1]}")
+        return {"n": int(m.group(2)), "tile": int(m.group(3)), "fmt": m.group(1), "kind": "mesh", "ck": 0 if m.group(4) else 1, "held": int(held)}
 
     def argv(self, name, opts):
         p = self.parse(name)
         if p["kind"] != "mesh":
             return ["make", p["kind"]] + ([f"PYTHON={sys.executable}"] if p["kind"] == "model-tests" else [])
+        held = " --held-accum --group matmul" if p["held"] else ""  # the held stage runs in mm_accum, a matmul test
         return ["make", "mesh-regression", f"MATRIX_SIZE={p['n']}",
-                f"REGRESSION_OPTS=--format {p['fmt']} --collapse-k {p['ck']} --tiles {p['tile']} --no-checks", f"PYTHON={sys.executable}"]
+                f"REGRESSION_OPTS=--format {p['fmt']} --collapse-k {p['ck']} --tiles {p['tile']} --no-checks{held}", f"PYTHON={sys.executable}"]
 
     def verdict(self, name, text, rc):
         v = regress.common_verdict(text, rc)

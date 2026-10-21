@@ -15,6 +15,10 @@ CHECKS = ["model-tests", "aril-fpu", "aril-narrow"]
 def test_points():
     small, full = reg.SPEC.points(True, list(reg.FORMATS)), reg.SPEC.points(False, list(reg.FORMATS))
     assert small[:3] == full[:3] == CHECKS, small[:4]  # format-independent: once
+    held = lambda pts: [p for p in pts if p.endswith("/mesh-held")]
+    assert held(small) == held(full) == [f"{f}/N{n}_T{t}/mesh-held" for f in reg.FORMATS for n in (8, 16) for t in (2, 4)], held(small)
+    assert all(reg.SPEC.parse(p)["ck"] == 0 and reg.SPEC.parse(p)["held"] == 1 for p in held(small))
+    small, full = [p for p in small if p not in held(small)], [p for p in full if p not in held(full)]
     sweep = lambda pts: sorted({(reg.SPEC.parse(p)["n"], reg.SPEC.parse(p)["tile"]) for p in pts[3:]})
     assert sweep(small) == [(8, 2), (8, 4), (8, 8), (16, 2), (16, 4), (16, 8), (16, 16)], sweep(small)
     assert sweep(full) == sweep(small) + [(32, t) for t in (2, 4, 8, 16, 32)] + [(64, t) for t in (2, 4, 8, 16, 32, 64)], sweep(full)
@@ -22,8 +26,9 @@ def test_points():
     for f in reg.FORMATS:  # collapse-k 1 and 0 at every N and tile size
         assert [p.rsplit("/", 1)[1] for p in full if p.startswith(f"{f}/N64_T2/")] == ["mesh", "mesh-ck0"], f
     assert [reg.SPEC.parse(p)["ck"] for p in ("fp32/N8_T2/mesh", "fp32/N8_T2/mesh-ck0")] == [1, 0]
-    assert reg.SPEC.points(True, ["int8"]) == CHECKS + [p for p in small if p.startswith("int8/")] and reg.SPEC.points(False, []) == []
-    for bad in ("fp32/N8_T16/mesh", "fp16/N8_T2/mesh", "fp32/N12_T4/mesh", "fp32/model-tests", "fp32/N8_T2/pipeline", "fp32/N8_T2/mesh-ck2", "nosuch"):
+    assert reg.SPEC.points(True, ["int8"]) == CHECKS + [p for p in small + held(reg.SPEC.points(True, ["int8"])) if p.startswith("int8/")]
+    assert reg.SPEC.points(False, []) == []
+    for bad in ("fp32/N8_T8/mesh-held", "fp32/N32_T2/mesh-held", "fp32/N8_T16/mesh", "fp16/N8_T2/mesh", "fp32/N12_T4/mesh", "fp32/model-tests", "fp32/N8_T2/pipeline", "fp32/N8_T2/mesh-ck2", "nosuch"):
         try:
             reg.SPEC.parse(bad)
         except ValueError:
@@ -37,6 +42,9 @@ def test_commands():
                                                        "REGRESSION_OPTS=--format bf16 --collapse-k 1 --tiles 8 --no-checks", f"PYTHON={py}"]
     assert reg.SPEC.argv("int8/N64_T4/mesh-ck0", None) == ["make", "mesh-regression", "MATRIX_SIZE=64",
                                                            "REGRESSION_OPTS=--format int8 --collapse-k 0 --tiles 4 --no-checks", f"PYTHON={py}"]
+    assert reg.SPEC.argv("bf16/N8_T2/mesh-held", None) == ["make", "mesh-regression", "MATRIX_SIZE=8",
+                                                           "REGRESSION_OPTS=--format bf16 --collapse-k 0 --tiles 2 --no-checks --held-accum --group matmul",
+                                                           f"PYTHON={py}"]
     assert reg.SPEC.argv("model-tests", None) == ["make", "model-tests", f"PYTHON={py}"] and reg.SPEC.argv("aril-narrow", None)[:2] == ["make", "aril-narrow"]
     assert [reg.make_args(n, ck) for n, ck in ((64, 0), (64, 1), (32, 0))] == [["LARGE_CODE=1"], [], []]  # a collapse-k 0 N = 64 binary passes 2 GB
     env = {k: x for k, x in os.environ.items() if not k.startswith("MAKE")}
@@ -58,6 +66,7 @@ def test_build_config():
     """A build's format is make's FMT (the define) and its sizes are -G overrides of TB_SystolicMesh's parameters; no script edits the bench."""
     assert reg.build_args("bf16", 16, 4, 5, 1) == ["FMT=bf16", "MATRIX_SIZE=16", "TILE_SIZE=4", "NUM_TEST_SETS=5", "COLLAPSE_K=1"]
     assert reg.build_args("int8", 64, 8, 3, 0) == ["FMT=int8", "MATRIX_SIZE=64", "TILE_SIZE=8", "NUM_TEST_SETS=3", "COLLAPSE_K=0", "LARGE_CODE=1"]
+    assert reg.build_args("fp32", 8, 2, 5, 0, 1)[-1] == "HELD_ACCUM=1"
     env = {k: x for k, x in os.environ.items() if not k.startswith("MAKE") and k not in ("FMT", "MATRIX_SIZE", "TILE_SIZE", "NUM_TEST_SETS", "COLLAPSE_K")}
     make_n = lambda *a: subprocess.run(["make", "-s", "-n", *a], cwd=ROOT, capture_output=True, text=True, env=env)
     for f in reg.FORMATS:
@@ -65,6 +74,8 @@ def test_build_config():
         assert f"+define+FMT_{f.upper()} " in out and "-GMATRIX_SIZE=8 -GTILE_SIZE=2 -GNUM_TEST_SETS=7 -GCOLLAPSE_K=0" in out, (f, out[-300:])
         assert all(f"+define+FMT_{g.upper()}" not in out for g in reg.FORMATS if g != f), f  # one define per build
     dflt = make_n("verilator").stdout
+    assert "HELD_ACCUM" not in dflt  # off by default: every other point's build is unchanged
+    assert "-GHELD_ACCUM=1" in make_n("verilator", *reg.build_args("fp32", 8, 2, 5, 0, 1)).stdout
     assert "+define+FMT_FP32 " in dflt and "-GMATRIX_SIZE=16 -GTILE_SIZE=4 -GNUM_TEST_SETS=5 -GCOLLAPSE_K=1" in dflt, dflt[-300:]  # the bench's defaults
     assert "-GMATRIX_SIZE" not in make_n("verilator", "TOP_MODULE=TB_PE").stdout  # the sizes are TB_SystolicMesh's only
     assert make_n("verilator", "FMT=fp16").returncode != 0 and make_n("lint", "FMT=bf16 int8").returncode != 0

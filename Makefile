@@ -16,6 +16,8 @@ MATRIX_SIZE       ?= 16
 TILE_SIZE         ?= 4
 NUM_TEST_SETS     ?= 5
 COLLAPSE_K        ?= 1
+# HELD_ACCUM=1: TB_SystolicMesh's held accumulate stage too (the mesh-held points).
+HELD_ACCUM        ?= 0
 REGRESSION_GROUP  ?= all
 FAST              ?= 0
 REGRESSION_OPTS   ?=
@@ -100,6 +102,9 @@ endif
 VERILATOR_FLAGS += $(FMT_DEF)
 ifeq ($(TOP_MODULE),TB_SystolicMesh)
 VERILATOR_FLAGS += -GMATRIX_SIZE=$(MATRIX_SIZE) -GTILE_SIZE=$(TILE_SIZE) -GNUM_TEST_SETS=$(NUM_TEST_SETS) -GCOLLAPSE_K=$(COLLAPSE_K)
+ifneq ($(HELD_ACCUM),0)
+VERILATOR_FLAGS += -GHELD_ACCUM=$(HELD_ACCUM)
+endif
 endif
 
 # One-off defines, e.g. EXTRA_FLAGS=-DASSERT_SELFTEST
