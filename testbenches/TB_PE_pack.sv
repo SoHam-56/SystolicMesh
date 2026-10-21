@@ -1,9 +1,7 @@
 `timescale 1ns / 100ps
 
-// One format's packed-PE bench: NP PEs at spread columns take one stream; each slot must hold only its block's products.
+// The packed-PE bench in the build's format: NP PEs at spread columns take one stream; each slot must hold only its block's products.
 module pe_pack_bench #(
-    parameter int EXP_W = 8,
-    parameter int MAN_W = 23,
     parameter int K = 16,
     parameter int NP = 4,
     parameter int NSETS = 30
@@ -13,12 +11,13 @@ module pe_pack_bench #(
     output int   checked_o,
     output int   nonzero_o  // expected slots that are not zero: a float bench of zeros checks nothing
 );
-  localparam int DW = 1 + EXP_W + MAN_W;
-  localparam int ACC_W = sienna_fmt_pkg::acc_w(EXP_W, MAN_W);
-  localparam int ADD1 = sienna_fmt_pkg::add_lat(EXP_W, MAN_W) + 1;
+  localparam int DW = sienna_fmt_pkg::DATA_WIDTH;
+  localparam int ACC_W = sienna_fmt_pkg::ACC_DATA_WIDTH;
+  localparam int MAN_W = sienna_fmt_pkg::MANTISSA_WIDTH;  // the bench's own encoder; the PE never sees the format
+  localparam int ADD1 = sienna_fmt_pkg::ADD_LATENCY + 1;
   localparam int U = (K < ADD1) ? K : ADD1;
   localparam int BANKS = 3, BW = 2, LGK = $clog2(K);
-  localparam bit IS_INT = sienna_fmt_pkg::is_int(EXP_W);
+  localparam bit IS_INT = sienna_fmt_pkg::EXPONENT_WIDTH == 0;
 
   logic clk = 0, rstn = 0;
   always #5 clk = ~clk;
@@ -34,7 +33,7 @@ module pe_pack_bench #(
   always @(posedge clk) pack_q <= pack;
 
   for (genvar p = 0; p < NP; p++) begin : PE
-    ProcessingElement #(.EXP_W(EXP_W), .MAN_W(MAN_W), .DATA_WIDTH(DW), .ACC_W(ACC_W), .K(K), .BANKS(BANKS), .U(U), .BW(BW),
+    ProcessingElement #(.K(K), .BANKS(BANKS), .U(U), .BW(BW),
                         .COL((p * (K - 1)) / (NP - 1))) dut (
         .clk_i(clk), .rstn_i(rstn), .a_i(a), .b_i(b), .v_i(v), .fresh_i(fresh), .more_i(1'b0), .pack_i(pack),
         .a_o(), .b_o(), .v_o(), .fresh_o(), .more_o(), .pack_o(pack_o[p]),
@@ -135,7 +134,7 @@ module pe_pack_bench #(
                   if (want[s][p][u] != '0) nonzero_o++;
                   if (part[p][u] !== want[s][p][u]) begin
                     errs_o++;
-                    if (errs_o <= 20) $display("[FAIL] EXP_W=%0d set %0d shift %0d PE %0d slot %0d: got %h, want %h", EXP_W, s,
+                    if (errs_o <= 20) $display("[FAIL] %s set %0d shift %0d PE %0d slot %0d: got %h, want %h", sienna_fmt_pkg::FORMAT_NAME, s,
                                                sh[s], p, u, part[p][u], want[s][p][u]);
                   end
                 end
@@ -149,7 +148,7 @@ module pe_pack_bench #(
       end
       begin : watchdog
         repeat (40000) @(posedge clk);
-        $display("[FATAL] pe_pack_bench EXP_W=%0d MAN_W=%0d timeout", EXP_W, MAN_W);
+        $display("[FATAL] pe_pack_bench %s timeout", sienna_fmt_pkg::FORMAT_NAME);
         $finish;
       end
     join_any
@@ -157,29 +156,28 @@ module pe_pack_bench #(
     for (int p = 0; p < NP; p++)
       if (muls[p] != want_muls[p]) begin
         errs_o++;
-        $display("[FAIL] EXP_W=%0d PE %0d issued %0d multiplies, want %0d", EXP_W, p, muls[p], want_muls[p]);
+        $display("[FAIL] %s PE %0d issued %0d multiplies, want %0d", sienna_fmt_pkg::FORMAT_NAME, p, muls[p], want_muls[p]);
       end
     if (pass_errs != 0) begin
       errs_o++;
-      $display("[FAIL] EXP_W=%0d pack_o was not pack_i delayed one cycle (%0d cycles)", EXP_W, pass_errs);
+      $display("[FAIL] %s pack_o was not pack_i delayed one cycle (%0d cycles)", sienna_fmt_pkg::FORMAT_NAME, pass_errs);
     end
     done_o = 1;
   end
 endmodule
 
-// ProcessingElement under packing in fp32 (U = 6), bf16 (U = 6) and int8 (U = 2), K = 16 / 16 / 8, every shift.
+// ProcessingElement under packing in the build's format, every shift: fp32 and bf16 K = 16 over 4 PEs (U = 6), int8 K = 8 over 3 (U = 2).
 module TB_PE_pack;
-  logic d_f, d_b, d_i;
-  int e_f, e_b, e_i, c_f, c_b, c_i, z_f, z_b, z_i;
-  pe_pack_bench #(.EXP_W(8), .MAN_W(23), .K(16), .NP(4)) F (.done_o(d_f), .errs_o(e_f), .checked_o(c_f), .nonzero_o(z_f));
-  pe_pack_bench #(.EXP_W(8), .MAN_W(7), .K(16), .NP(4)) B (.done_o(d_b), .errs_o(e_b), .checked_o(c_b), .nonzero_o(z_b));
-  pe_pack_bench #(.EXP_W(0), .MAN_W(7), .K(8), .NP(3)) I (.done_o(d_i), .errs_o(e_i), .checked_o(c_i), .nonzero_o(z_i));
+  localparam bit IS_INT = sienna_fmt_pkg::EXPONENT_WIDTH == 0;
+  localparam int K = IS_INT ? 8 : 16, NP = IS_INT ? 3 : 4, NSETS = 30;
+  localparam int U = (K < sienna_fmt_pkg::ADD_LATENCY + 1) ? K : sienna_fmt_pkg::ADD_LATENCY + 1;
+  logic d;
+  int e, c, z;
+  pe_pack_bench #(.K(K), .NP(NP), .NSETS(NSETS)) X (.done_o(d), .errs_o(e), .checked_o(c), .nonzero_o(z));
   initial begin
-    wait (d_f && d_b && d_i);
-    $display("TB_PE_pack: fp32 %0d slots (%0d nonzero) %0d errors, bf16 %0d slots (%0d nonzero) %0d errors, int8 %0d slots (%0d nonzero) %0d errors",
-             c_f, z_f, e_f, c_b, z_b, e_b, c_i, z_i, e_i);
-    if (e_f + e_b + e_i == 0 && c_f == 30 * 4 * 6 && c_b == 30 * 4 * 6 && c_i == 30 * 3 * 2 && z_f * 2 > c_f && z_b * 2 > c_b && z_i * 2 > c_i)
-      $display("RESULT: PASSED");
+    wait (d);
+    $display("TB_PE_pack: %s %0d slots (%0d nonzero) %0d errors", sienna_fmt_pkg::FORMAT_NAME, c, z, e);
+    if (e == 0 && c == NSETS * NP * U && z * 2 > c) $display("RESULT: PASSED");
     else $display("RESULT: FAILED");
     $finish;
   end
