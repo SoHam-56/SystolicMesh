@@ -212,6 +212,14 @@ module ProcessingElement #(
                                  (prod_tick && n_prod == CW'(K - 1)) |-> (int'(u_cnt) + int'(prod_v)) == (K >> int'(prod_pack)))
     else $error("ProcessingElement: a pass counted %0d products, its block holds %0d", int'(u_cnt) + int'(prod_v),
                 K >> int'(prod_pack));
+  // An add must not read a slot whose earlier add is in flight (the one at ADD_LAT-1 writes back this cycle, after the read).
+  logic slot_in_flight;
+  always_comb begin
+    slot_in_flight = 1'b0;
+    for (int i = 0; i < ADD_LAT; i++) if (v_dly[i] && bank_dly[i] == cur && slot_dly[i] == slot) slot_in_flight = 1'b1;
+  end
+  a_slot_ready: assert property (@(posedge clk_i) disable iff (!rstn_i) prod_v |-> !slot_in_flight)
+    else $error("ProcessingElement: add into bank %0d slot %0d issued while an earlier add to it is in flight", cur, slot);
 `endif
 
 endmodule
