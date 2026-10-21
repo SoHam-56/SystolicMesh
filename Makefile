@@ -184,6 +184,10 @@ check-fmt:
 	elif ! /usr/bin/grep -q '^check-fmt: 1 RTL files outside the allowlist, 1 naming a precision$$' $$t/c4.log; then echo "check-fmt FAIL: C4 failed for another reason"; cat $$t/c4.log; exit 1; \
 	else echo "check-fmt OK: C4 planted EXP_W in SystolicMesh.sv fails"; fi; rm -rf $$t
 
+# check-hier: at fp32, bf16, int8 and no define, both mesh modes, Verilator's elaborated hierarchy holds only that precision's units (check_hier.py).
+check-hier:
+	@$(PYTHON) $(PRJ_DIR)/check_hier.py --verilator $(VERILATOR) --out $(PRJ_DIR)/Verilator_hier --files $(DESIGN_FILES)
+
 clean:
 	@echo "-- Cleaning simulation artifacts"
 	-rm -rf $(VERILATOR_DIR) $(VCS_DIR)
@@ -252,4 +256,5 @@ regression: $(addprefix regression/,$(REG_POINTS))
 regression-summary:
 	@$(REG_SUMMARY)$(if $(REG_RUN), --run $(REG_RUN))
 
-.PHONY: default verilator vcs wave lint debug perf clean mesh-regression regression regression-summary aril-fpu aril-narrow model-tests check-fmt
+.PHONY: default verilator vcs wave lint debug perf clean mesh-regression regression regression-summary aril-fpu aril-narrow model-tests check-fmt \
+        check-hier
