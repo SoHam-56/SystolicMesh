@@ -176,11 +176,12 @@ endmodule
 // ProcessingElement under packing in the build's format, every shift: fp32 and bf16 K = 16 over 4 PEs (U = 6), int8 K = 8 over 3 (U = 2).
 module TB_PE_pack;
   localparam bit IS_INT = sienna_fmt_pkg::EXPONENT_WIDTH == 0;
-  localparam int K = IS_INT ? 8 : 16, NP = IS_INT ? 3 : 4, NSETS = 30;
+  localparam int FLOAT_K = 16;  // B's float benches' K: each drew 2 * FLOAT_K * NSETS operands before the next one
+  localparam int K = IS_INT ? 8 : FLOAT_K, NP = IS_INT ? 3 : 4, NSETS = 30;
   localparam int U = (K < sienna_fmt_pkg::ADD_LATENCY + 1) ? K : sienna_fmt_pkg::ADD_LATENCY + 1;
   logic d;
   int e, c, z;
-  localparam int SKIP = IS_INT ? 2 * 2 * 16 * NSETS : (sienna_fmt_pkg::DATA_WIDTH == 16) ? 2 * 16 * NSETS : 0;  // B's order: fp32, bf16, int8
+  localparam int SKIP = IS_INT ? 2 * (2 * FLOAT_K * NSETS) : (sienna_fmt_pkg::DATA_WIDTH == 16) ? 2 * FLOAT_K * NSETS : 0;  // B's order: fp32, bf16, int8
   pe_pack_bench #(.K(K), .NP(NP), .NSETS(NSETS), .SKIP(SKIP)) X (.done_o(d), .errs_o(e), .checked_o(c), .nonzero_o(z));
   initial begin
     wait (d);
