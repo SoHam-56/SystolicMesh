@@ -478,10 +478,6 @@ module SystolicMesh #(
             .P(RPU + 1),  // the partials and the bias
             .RESULT_BANKS(RESULT_BANKS),
             .N(TILE_SIZE),
-            .EXP_W(EXP_W),
-            .MAN_W(MAN_W),
-            .ACC_W(ACC_W),
-            .OUT_W(OUT_W),
             .MATRIX_WIDTH(MATRIX_SIZE),
             .TILE_ROW_OFFSET(i * TILE_SIZE),
             .TILE_COL_OFFSET(j * TILE_SIZE)
