@@ -870,7 +870,7 @@ module TB_SystolicMesh #(
   // The sum's fresh first pass waits for a partial-sum bank with its next pass in the other operand bank, so on release they launch K apart.
   task automatic accum_held_pass();
     string f_a, f_b, f_c;
-    int np, errs, fill;
+    int np, errs, fill, early0, early;
     integer fh;
     np = 0;
     forever begin
@@ -886,6 +886,7 @@ module TB_SystolicMesh #(
       $finish;
     end
     $display("\n[STAGE] HELD ACCUMULATE: %0d sets fill the mesh with the consumer holding, then one sum over %0d passes", fill, np);
+    early0 = dut.ROW[0].COL[0].DEPTH[0].S.tile.early_passes;  // every array runs in lockstep: one array's cover stands for all
     res_hold = 1;
     fork
       begin
@@ -924,6 +925,18 @@ module TB_SystolicMesh #(
       end
     join_any
     disable fork;
+    // The stage must reach the hazard where it exists (K < ADD_LATENCY + 1) and cannot elsewhere: a stimulus that stops reaching it fails.
+    early = dut.ROW[0].COL[0].DEPTH[0].S.tile.early_passes - early0;
+    $display("  [Held] %0d continuing passes ready under ADD_LATENCY + 1 cycles after the previous launch", early);
+    if (COLLAPSE_K == 0 && TILE_SIZE < sienna_fmt_pkg::ADD_LATENCY + 1) begin
+      if (early == 0) begin
+        $display("  [FAIL] Held accumulate: no continuing pass was ready early, so the stage no longer reaches the K < ADD_LATENCY + 1 hazard");
+        sets_failed++;
+      end
+    end else if (early != 0) begin
+      $display("  [FAIL] Held accumulate: %0d continuing passes ready early where a pass is ADD_LATENCY + 1 cycles or longer", early);
+      sets_failed++;
+    end
     drain_check("held accumulate");
   endtask
 
