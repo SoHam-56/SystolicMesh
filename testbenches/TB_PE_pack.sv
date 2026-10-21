@@ -4,7 +4,8 @@
 module pe_pack_bench #(
     parameter int K = 16,
     parameter int NP = 4,
-    parameter int NSETS = 30
+    parameter int NSETS = 30,
+    parameter int SKIP = 0  // $urandom draws to discard first: B's single build drew fp32's, then bf16's, then int8's operands from one stream
 ) (
     output logic done_o,
     output int   errs_o,
@@ -71,6 +72,7 @@ module pe_pack_bench #(
       errs_o++;
       $display("[FAIL] fp32_of: 1 %h, 3 %h, 256 %h, 255 %h", fp32_of(1), fp32_of(3), fp32_of(256), fp32_of(255));
     end
+    repeat (SKIP) void'($urandom);
     lst = '{0, 1, 2, LGK - 1};
     for (int p = 0; p < NP; p++) want_muls[p] = 0;
     for (int s = 0; s < NSETS; s++) begin
@@ -97,6 +99,11 @@ module pe_pack_bench #(
         for (int u = 0; u < U; u++)
           want[s][p][u] = !hit[u] ? '0 : IS_INT ? ACC_W'(sums[u]) : ACC_W'(fp32_of(sums[u]));  // floats: fp32 sums
       end
+    end
+    begin  // +stim_sum: a checksum of the operands, to show the stream is B's
+      automatic int unsigned chk = 0;
+      for (int s = 0; s < NSETS; s++) for (int k = 0; k < K; k++) chk = chk * 31 + 32'(xa[s][k]) * 7 + 32'(xb[s][k]);
+      if ($test$plusargs("stim_sum")) $display("pe_pack_bench stimulus checksum %08h (K %0d, NP %0d)", chk, K, NP);
     end
     repeat (3) @(posedge clk);
     #1 rstn = 1;
@@ -173,7 +180,8 @@ module TB_PE_pack;
   localparam int U = (K < sienna_fmt_pkg::ADD_LATENCY + 1) ? K : sienna_fmt_pkg::ADD_LATENCY + 1;
   logic d;
   int e, c, z;
-  pe_pack_bench #(.K(K), .NP(NP), .NSETS(NSETS)) X (.done_o(d), .errs_o(e), .checked_o(c), .nonzero_o(z));
+  localparam int SKIP = IS_INT ? 2 * 2 * 16 * NSETS : (sienna_fmt_pkg::DATA_WIDTH == 16) ? 2 * 16 * NSETS : 0;  // B's order: fp32, bf16, int8
+  pe_pack_bench #(.K(K), .NP(NP), .NSETS(NSETS), .SKIP(SKIP)) X (.done_o(d), .errs_o(e), .checked_o(c), .nonzero_o(z));
   initial begin
     wait (d);
     $display("TB_PE_pack: %s %0d slots (%0d nonzero) %0d errors", sienna_fmt_pkg::FORMAT_NAME, c, z, e);
