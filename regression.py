@@ -6,36 +6,16 @@ Exploits make's incremental compilation to avoid redundant rebuilds.
 
 How it works
 ------------
-The TB has three compile-time localparams: MATRIX_SIZE, TILE_SIZE,
-NUM_TEST_SETS.  These define one RTL configuration.  The stimulus (.mem
-files) are read at runtime and are not RTL — changing them never triggers
-a recompile.
-
-The script therefore:
-  1. Patches the TB once for a given (N, tile, num_sets) config.
-  2. Runs `make` for every test in that config back-to-back.
-     - First test  : make sees the TB timestamp changed → compiles TB, then sims.
-     - Every subsequent test in the same config : only .mem files changed →
-       make skips compilation and runs the simulator directly.
-  3. Patches the TB to the next config (next tile size) → make recompiles TB.
-  4. Repeats.
-
-Result: one TB compilation per (tile × group), zero redundant compiles.
-No changes to the Makefile are needed.
+A build is one configuration: make's FMT (the define) and the TB parameters MATRIX_SIZE, TILE_SIZE, NUM_TEST_SETS and COLLAPSE_K,
+which make passes as Verilator -G overrides; no script edits a source file. The stimulus (.mem files) is read at run time, so tests
+of one configuration share one build: Verilator rebuilds only when the configuration changes.
 
 Execution order
 ---------------
   first the model checks (make aril-fpu, aril-narrow, model-tests), each against its own reference
   for each tile T:
-      patch TB(N, T, MATMUL_NUM_SETS)     ← TB file touched, triggers compile
-      for each matmul test:
-          write .mem files
-          make                             ← 1st: compile+sim  |  rest: sim only
-      patch TB(N, T, CONV_NUM_SETS)       ← TB file touched, triggers compile
-      for each conv test:
-          write .mem files
-          make                             ← 1st: compile+sim  |  rest: sim only
-  restore TB to original
+      for each matmul test: write .mem files, make FMT=f MATRIX_SIZE=N TILE_SIZE=T NUM_TEST_SETS=MATMUL_NUM_SETS COLLAPSE_K=ck
+      for each conv test:   the same with CONV_NUM_SETS (the first test of each builds, the rest only simulate)
 
 Usage
 -----
@@ -68,7 +48,7 @@ import stim_format
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ArithmeticLibrary", "Common", "models"))
 import truth  # noqa: E402  AriL's true-function gate: the mesh's sums against the float64 sum of its operands
 
-FORMATS = {"fp32": (8, 23), "bf16": (8, 7), "int8": (0, 7)}
+FORMATS = ("fp32", "bf16", "int8")  # make's FMT: the build's define
 FMT, COLLAPSE = "fp32", 1  # set from --format and --collapse-k
 
 # ---------------------------------------------------------------------------
@@ -96,69 +76,14 @@ wrn = lambda s: f"{_Y}{s}{_X}"
 hdr = lambda s: f"{_O}{_B}{s}{_X}"
 
 # ---------------------------------------------------------------------------
-# Testbench patch / restore
-# ---------------------------------------------------------------------------
-
-
-def _find_tb() -> str:
-    for root, _, files in os.walk(ROOT):
-        for f in files:
-            if f == "TB_SystolicMesh.sv":
-                return os.path.join(root, f)
-    return None
-
-
-def _patch_tb(
-    tb_path: str, matrix_size: int, tile_size: int, num_test_sets: int
-) -> str:
-    """
-    Overwrite the three compile-time localparams in the TB.
-    Returns the original file text so the caller can restore it later.
-    Touching this file is what tells make to recompile the TB.
-    """
-    with open(tb_path) as fh:
-        original = fh.read()
-    patched = original
-    patched = re.sub(
-        r"(localparam\s+MATRIX_SIZE\s*=\s*)\d+", rf"\g<1>{matrix_size}", patched
-    )
-    patched = re.sub(
-        r"(localparam\s+TILE_SIZE\s*=\s*)\d+", rf"\g<1>{tile_size}", patched
-    )
-    patched = re.sub(
-        r"(localparam\s+int\s+NUM_TEST_SETS\s*=\s*)\d+",
-        rf"\g<1>{num_test_sets}",
-        patched,
-    )
-    exp_w, man_w = FORMATS[FMT]
-    for name, val in (("EXP_W", exp_w), ("MAN_W", man_w), ("COLLAPSE_K", COLLAPSE)):
-        patched, n = re.subn(rf"(localparam\s+int\s+{name}\s*=\s*)\d+", rf"\g<1>{val}", patched)
-        assert n == 1, f"TB has no localparam int {name}"
-    with open(tb_path, "w") as fh:
-        fh.write(patched)
-    return original
-
-
-def _restore_tb(tb_path: str, original: str) -> None:
-    with open(tb_path, "w") as fh:
-        fh.write(original)
-
-
-# ---------------------------------------------------------------------------
 # Make runner
 # ---------------------------------------------------------------------------
 
 
-def _make() -> tuple:
-    """
-    Run `make` in the project root.
-    Returns (combined stdout+stderr, wall_seconds).
-    make decides internally whether to recompile based on file timestamps:
-      - TB .sv changed  → compile TB then simulate
-      - only .mem changed → simulate directly, no recompile
-    """
+def _make(tile: int, num_sets: int) -> tuple:
+    """Runs `make` in the project root for one configuration; returns (stdout and stderr, wall seconds). Verilator rebuilds only on a new configuration."""
     t0 = time.time()
-    r = subprocess.run(["make", *make_args(MATRIX_N, COLLAPSE)], cwd=ROOT, capture_output=True, text=True)
+    r = subprocess.run(["make", *build_args(FMT, MATRIX_N, tile, num_sets, COLLAPSE)], cwd=ROOT, capture_output=True, text=True)
     out = r.stdout + r.stderr
     if r.returncode != 0:
         out += f"\nBUILDFAIL: make exited {r.returncode}\n"
@@ -168,6 +93,11 @@ def _make() -> tuple:
 def make_args(n: int, ck: int) -> list:
     """The build's make variables: the large code model where the binary passes 2 GB (collapse-k 0 at N = 64)."""
     return ["LARGE_CODE=1"] if ck == 0 and n >= 64 else []
+
+
+def build_args(fmt: str, n: int, tile: int, num_sets: int, ck: int) -> list:
+    """make's variables for one configuration: the define (FMT), TB_SystolicMesh's sizes as -G overrides, and make_args."""
+    return [f"FMT={fmt}", f"MATRIX_SIZE={n}", f"TILE_SIZE={tile}", f"NUM_TEST_SETS={num_sets}", f"COLLAPSE_K={ck}", *make_args(n, ck)]
 
 
 # Make targets checked against their own references, not mesh_model's agreement with the RTL (a bug shared by both passes that).
@@ -349,86 +279,71 @@ def _print_result(r: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_group(
-    tests: list, tile: int, N: int, num_sets: int, tb_path: str, group_label: str
-) -> list:
-    """
-    Patch the TB for (N, tile, num_sets) — this is the only moment the TB
-    file is written, so make will compile exactly once for this config.
-    Then call make for each test; subsequent calls only touch .mem files
-    so make skips compilation and runs the simulator directly.
-    """
+def _run_group(tests: list, tile: int, N: int, num_sets: int, group_label: str) -> list:
+    """Every test of one configuration (FMT, N, tile, num_sets, collapse-k): the first make builds it, the rest only simulate."""
     results = []
 
     print(hdr(f"\n  ╔══  {group_label}  TILE={tile}  N={N}  SETS={num_sets}"))
-
-    # ── Single TB patch for the whole group ──────────────────────────────
-    original = _patch_tb(tb_path, N, tile, num_sets)
     stim_format.configure(FMT, tile, COLLAPSE)
 
-    try:
-        for idx, test in enumerate(tests):
-            print(f"  ║  [{idx+1}/{len(tests)}] {test['name']}", end="  ", flush=True)
+    for idx, test in enumerate(tests):
+        print(f"  ║  [{idx+1}/{len(tests)}] {test['name']}", end="  ", flush=True)
 
-            # Write stimulus — only .mem files change, TB is untouched
-            os.makedirs(STIM_DIR, exist_ok=True)
-            test["gen_fn"](STIM_DIR, N)
-            stim_format.check_widths(STIM_DIR)
-            if os.path.exists(TRUTH_DUMP):
-                os.remove(TRUTH_DUMP)  # a stale dump would be gated as this test's
+        # Write stimulus: only .mem files change
+        os.makedirs(STIM_DIR, exist_ok=True)
+        test["gen_fn"](STIM_DIR, N)
+        stim_format.check_widths(STIM_DIR)
+        if os.path.exists(TRUTH_DUMP):
+            os.remove(TRUTH_DUMP)  # a stale dump would be gated as this test's
 
-            # make: compiles TB on first call (TB timestamp changed),
-            #       skips compile on all subsequent calls (no RTL change)
-            raw, wall = _make()
+        # make: the configuration's first test builds it, the rest reuse the build
+        raw, wall = _make(tile, num_sets)
 
-            parsed = _parse(raw)
-            if parsed["status"] == "PASS" and test.get("expect", "") not in raw:  # a stage the test needs never ran
+        parsed = _parse(raw)
+        if parsed["status"] == "PASS" and test.get("expect", "") not in raw:  # a stage the test needs never ran
+            parsed["status"] = "FAIL"
+            print(err(f"[FAIL] '{test['expect']}' is not in the log"), end="  ")
+        tres = {}
+        if parsed["status"] in ("PASS", "FAIL"):  # the TB ran to its summary: gate what it dumped
+            try:
+                tres = truth_gate(TRUTH_DUMP, STIM_DIR, N, FMT)
+                tl, tbad = truth_lines(tres)
+            except (RuntimeError, ValueError, OSError) as e:
+                tl, tbad = [], [f"[FAIL] truth: none ({e})"]
+            if os.path.exists(TRUTH_DUMP):  # kept beside the log, so a run's sums can be judged again offline
+                os.makedirs(RESULTS_DIR, exist_ok=True)
+                shutil.copy(TRUTH_DUMP, os.path.join(RESULTS_DIR, f"{test['name']}_N{N}_T{tile}_truth_dump.txt"))
+            raw += "\n".join(["", "TRUE-FUNCTION GATE (truth.py; the bit-exact compare above is a diagnostic, still required):"] + tl + tbad) + "\n"
+            if tbad:
                 parsed["status"] = "FAIL"
-                print(err(f"[FAIL] '{test['expect']}' is not in the log"), end="  ")
-            tres = {}
-            if parsed["status"] in ("PASS", "FAIL"):  # the TB ran to its summary: gate what it dumped
-                try:
-                    tres = truth_gate(TRUTH_DUMP, STIM_DIR, N, FMT)
-                    tl, tbad = truth_lines(tres)
-                except (RuntimeError, ValueError, OSError) as e:
-                    tl, tbad = [], [f"[FAIL] truth: none ({e})"]
-                if os.path.exists(TRUTH_DUMP):  # kept beside the log, so a run's sums can be judged again offline
-                    os.makedirs(RESULTS_DIR, exist_ok=True)
-                    shutil.copy(TRUTH_DUMP, os.path.join(RESULTS_DIR, f"{test['name']}_N{N}_T{tile}_truth_dump.txt"))
-                raw += "\n".join(["", "TRUE-FUNCTION GATE (truth.py; the bit-exact compare above is a diagnostic, still required):"] + tl + tbad) + "\n"
-                if tbad:
-                    parsed["status"] = "FAIL"
-            log_name = f"{test['name']}_N{N}_T{tile}.log"
-            os.makedirs(RESULTS_DIR, exist_ok=True)
-            with open(os.path.join(RESULTS_DIR, log_name), "w") as fh:
-                fh.write(raw)
+        log_name = f"{test['name']}_N{N}_T{tile}.log"
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        with open(os.path.join(RESULTS_DIR, log_name), "w") as fh:
+            fh.write(raw)
 
-            r = dict(
-                name=test["name"],
-                group=test.get("group", ""),
-                tile=tile,
-                N=N,
-                wall=wall,
-                log=log_name,
-                truth=tres,
-                **parsed,
-            )
-            results.append(r)
-            _print_result(r)
-            for ln in [x for x in raw.splitlines() if x.startswith(("        TRUTH ", "[FAIL] truth:"))]:
-                print(f"      {ln.strip()}")
-            if "BUILDFAIL" in raw:  # the next test would rebuild the same config and fail the same way
-                for rest in tests[idx + 1:]:
-                    results.append(dict(name=rest["name"], group=rest.get("group", ""), tile=tile, N=N, wall=0.0,
-                                        log=log_name, status="NO-RUN", passed=0, failed=0, elements=0, tol=0,
-                                        fail_els=0, avg_cyc=0))
-                print(wrn(f"  ║  build failed at T={tile}: {len(tests) - idx - 1} remaining tests not run"))
-                break
+        r = dict(
+            name=test["name"],
+            group=test.get("group", ""),
+            tile=tile,
+            N=N,
+            wall=wall,
+            log=log_name,
+            truth=tres,
+            **parsed,
+        )
+        results.append(r)
+        _print_result(r)
+        for ln in [x for x in raw.splitlines() if x.startswith(("        TRUTH ", "[FAIL] truth:"))]:
+            print(f"      {ln.strip()}")
+        if "BUILDFAIL" in raw:  # the next test would rebuild the same config and fail the same way
+            for rest in tests[idx + 1:]:
+                results.append(dict(name=rest["name"], group=rest.get("group", ""), tile=tile, N=N, wall=0.0,
+                                    log=log_name, status="NO-RUN", passed=0, failed=0, elements=0, tol=0,
+                                    fail_els=0, avg_cyc=0))
+            print(wrn(f"  ║  build failed at T={tile}: {len(tests) - idx - 1} remaining tests not run"))
+            break
 
-    finally:
-        # Restore after the whole group so we don't touch the TB mid-group
-        _restore_tb(tb_path, original)
-        print(f"  ╚══  TB restored")
+    print("  ╚══")
 
     return results
 
@@ -505,7 +420,7 @@ def _report(results: list, N: int, fast: bool, group: str, checks: list) -> str:
     L.append("-" * W)
     L.append("NOTES")
     L.append("-" * W)
-    L.append("* TB patched once per (tile x group); make handles incremental compilation")
+    L.append("* One build per (tile x group): make passes FMT and the sizes; no source file is edited")
     L.append("* Gate: truth.py, the sums before narrowing within max(1% of sum|ab|, 2^-126) of the float64 sum of the operands (int8: exact, int32-wrapped);"
              " bf16 narrowing exact; fp32 and int8 delivered words equal to the sums written")
     L.append("* Compare: bit-exact against mesh_model (matmul in the float formats, matmul_int in int8), a diagnostic that is still required")
@@ -602,8 +517,7 @@ def main() -> None:
             if n > conv_num_sets:
                 conv_num_sets = n
 
-    # ── Compile count — for display only ─────────────────────────────────
-    # One TB patch (and therefore one compile) per (tile × group).
+    # ── Compile count — for display only: one build per (tile × group) ──
     n_configs = len(tiles) * (bool(run_mm) + bool(run_conv))
     n_sims = (len(run_mm) + len(run_conv)) * len(tiles)
 
@@ -622,14 +536,6 @@ def main() -> None:
     print(f"  Simulations  : {n_sims}")
     print(hdr(f"{'═'*64}"))
 
-    tb_path = _find_tb()
-    if not tb_path:
-        print(err("[ERROR] TB_SystolicMesh.sv not found under project root"))
-        sys.exit(1)
-
-    with open(tb_path) as fh:
-        _original_tb = fh.read()
-
     all_results: list = []
     checks = [] if args.no_checks else _run_checks()
 
@@ -637,18 +543,15 @@ def main() -> None:
     try:
         for tile in tiles:
             if run_mm:
-                r = _run_group(run_mm, tile, N, MATMUL_NUM_SETS, tb_path, "MATMUL")
+                r = _run_group(run_mm, tile, N, MATMUL_NUM_SETS, "MATMUL")
                 all_results.extend(r)
 
             if run_conv:
-                r = _run_group(run_conv, tile, N, conv_num_sets, tb_path, "CONV")
+                r = _run_group(run_conv, tile, N, conv_num_sets, "CONV")
                 all_results.extend(r)
 
     except KeyboardInterrupt:
         print(wrn("\n  [Interrupted]"))
-    finally:
-        _restore_tb(tb_path, _original_tb)
-        print(f"\n  {ok('✓')} TB_SystolicMesh.sv restored to original")
 
     # ── Summary ───────────────────────────────────────────────────────────
     passed = sum(1 for r in all_results if r["status"] == "PASS")
@@ -718,7 +621,7 @@ class MeshSpec(regress.Spec):
     title = "SYSTOLICMESH REGRESSION"
     formats = tuple(FORMATS)
     sized = True
-    drop = ("MATRIX_SIZE", "REGRESSION_GROUP", "FAST", "REGRESSION_OPTS")
+    drop = ("MATRIX_SIZE", "TILE_SIZE", "NUM_TEST_SETS", "COLLAPSE_K", "REGRESSION_GROUP", "FAST", "REGRESSION_OPTS")
 
     def points(self, small, formats):
         if not formats:

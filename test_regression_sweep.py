@@ -54,6 +54,27 @@ def test_commands():
     assert re.search(r"`ifdef ENABLE_TRACE\s+\$dumpfile\([^)]*\);\s+\$dumpvars\([^)]*\);\s+`endif", tb), "the TB dumps only in a TRACE=1 build"
 
 
+def test_build_config():
+    """A build's format is make's FMT (the define) and its sizes are -G overrides of TB_SystolicMesh's parameters; no script edits the bench."""
+    assert reg.build_args("bf16", 16, 4, 5, 1) == ["FMT=bf16", "MATRIX_SIZE=16", "TILE_SIZE=4", "NUM_TEST_SETS=5", "COLLAPSE_K=1"]
+    assert reg.build_args("int8", 64, 8, 3, 0) == ["FMT=int8", "MATRIX_SIZE=64", "TILE_SIZE=8", "NUM_TEST_SETS=3", "COLLAPSE_K=0", "LARGE_CODE=1"]
+    env = {k: x for k, x in os.environ.items() if not k.startswith("MAKE") and k not in ("FMT", "MATRIX_SIZE", "TILE_SIZE", "NUM_TEST_SETS", "COLLAPSE_K")}
+    make_n = lambda *a: subprocess.run(["make", "-s", "-n", *a], cwd=ROOT, capture_output=True, text=True, env=env)
+    for f in reg.FORMATS:
+        out = make_n("verilator", *reg.build_args(f, 8, 2, 7, 0)).stdout
+        assert f"+define+FMT_{f.upper()} " in out and "-GMATRIX_SIZE=8 -GTILE_SIZE=2 -GNUM_TEST_SETS=7 -GCOLLAPSE_K=0" in out, (f, out[-300:])
+        assert all(f"+define+FMT_{g.upper()}" not in out for g in reg.FORMATS if g != f), f  # one define per build
+    dflt = make_n("verilator").stdout
+    assert "+define+FMT_FP32 " in dflt and "-GMATRIX_SIZE=16 -GTILE_SIZE=4 -GNUM_TEST_SETS=5 -GCOLLAPSE_K=1" in dflt, dflt[-300:]  # the bench's defaults
+    assert "-GMATRIX_SIZE" not in make_n("verilator", "TOP_MODULE=TB_PE").stdout  # the sizes are TB_SystolicMesh's only
+    assert make_n("verilator", "FMT=fp16").returncode != 0 and make_n("lint", "FMT=bf16 int8").returncode != 0
+    tb = open(os.path.join(ROOT, "testbenches", "TB_SystolicMesh.sv")).read()
+    for k in ("MATRIX_SIZE", "TILE_SIZE", "NUM_TEST_SETS", "COLLAPSE_K"):
+        assert re.search(rf"^\s*parameter int {k}\s*=", tb, re.M) and not re.search(rf"localparam\s+(int\s+)?{k}\s*=", tb), k
+    src = open(os.path.join(ROOT, "regression.py")).read()
+    assert not re.search(r"TB_SystolicMesh\.sv|localparam|re\.subn?\(", src), "regression.py edits no source file"
+
+
 def test_verdicts():
     mesh = ("  Simulations : 12\n  Passed      : \x1b[92m12\x1b[0m\n  TRUTH: 12 simulations gated, 0 with misses\n"
             "  Verdict : ✅  All tests passed — Sanity Clean\n")
@@ -85,15 +106,17 @@ def test_regression_target():
     one = run("regression/fp32/N8_T2/mesh").stdout.splitlines()
     assert len(one) == 1 and "--keep-going" not in one[0] and "--run" not in one[0], one
     assert run("regression", "SMALL=2").returncode != 0 and run("regression", "FMT=fp16").returncode != 0
-    for extra in ({"FMT": "int8"}, {"SMALL": "1"}, {"FMT": "fp16", "SMALL": "2"}):  # exported, they do not narrow it: only make's command line does
+    for extra in ({"FMT": "int8"}, {"SMALL": "1"}, {"SMALL": "2"}):  # exported, they do not narrow it: only make's command line does
         r = subprocess.run(["make", "-s", "-n", "regression", f"PYTHON={sys.executable}"], cwd=ROOT, capture_output=True, text=True, env=dict(env, **extra))
         names = [x.split("--name ")[1].split()[0] for x in r.stdout.splitlines() if "--action point " in x]
         assert r.returncode == 0 and names == reg.SPEC.points(False, list(reg.FORMATS)), (extra, r.stderr[-200:], len(names))
+    r = subprocess.run(["make", "-s", "-n", "regression", f"PYTHON={sys.executable}"], cwd=ROOT, capture_output=True, text=True, env=dict(env, FMT="fp16"))
+    assert r.returncode != 0 and "FMT=fp16: not one of fp32 bf16 int8" in r.stderr, r.stderr[-200:]  # an exported FMT is still the build's define: fp16 stops make
     r = run("mesh-regression", "MATRIX_SIZE=32", "REGRESSION_OPTS=--tiles 8")  # one N, as before: every tile size, or --tiles
     assert r.returncode == 0 and all(x in r.stdout for x in ("regression.py", "--matrix-size 32", "--group all", "--tiles 8")), r.stdout
 
 
-MIN_TESTS = 4  # tests this file holds; fewer run means one was lost, which is a failure
+MIN_TESTS = 5  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
