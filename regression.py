@@ -86,8 +86,11 @@ def _make(tile: int, num_sets: int) -> tuple:
     r = subprocess.run(["make", *build_args(FMT, MATRIX_N, tile, num_sets, COLLAPSE, HELD)], cwd=ROOT, capture_output=True, text=True)
     out = r.stdout + r.stderr
     if r.returncode != 0:
-        out += f"\nBUILDFAIL: make exited {r.returncode}\n"
+        out += f"\n{'SIMFAIL' if SIM_STARTED in out else 'BUILDFAIL'}: make exited {r.returncode}\n"  # a started simulation that stopped is not a build failure
     return out, time.time() - t0
+
+
+SIM_STARTED = "SYSTOLIC MESH VERIFICATION"  # TB_SystolicMesh's banner: the build finished and the simulation ran
 
 
 def make_args(n: int, ck: int) -> list:
@@ -336,6 +339,9 @@ def _run_group(tests: list, tile: int, N: int, num_sets: int, group_label: str) 
         _print_result(r)
         for ln in [x for x in raw.splitlines() if x.startswith(("        TRUTH ", "[FAIL] truth:"))]:
             print(f"      {ln.strip()}")
+        fired = [x for x in raw.splitlines() if "Assertion failed" in x]
+        if fired:  # the simulation stopped at the first firing assertion: name it, as the log does
+            print(f"      {fired[0].strip()[:200]}")
         if "BUILDFAIL" in raw:  # the next test would rebuild the same config and fail the same way
             for rest in tests[idx + 1:]:
                 results.append(dict(name=rest["name"], group=rest.get("group", ""), tile=tile, N=N, wall=0.0,

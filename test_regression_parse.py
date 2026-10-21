@@ -169,7 +169,17 @@ def truth_text(res):
     return "; ".join(reg.truth.stage_line(r) for r in res.values())
 
 
-MIN_TESTS = 11  # tests this file holds; fewer run means one was lost, which is a failure
+def test_assert_stop_is_not_a_build_failure():
+    """A simulation stopped by a firing assertion reports ASSERT and is not taken for a build failure that skips the configuration's other tests."""
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "regression.py")).read()
+    assert "'SIMFAIL' if SIM_STARTED in out else 'BUILDFAIL'" in src and reg.SIM_STARTED == "SYSTOLIC MESH VERIFICATION"
+    tb = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "testbenches", "TB_SystolicMesh.sv")).read()
+    assert reg.SIM_STARTED in tb, "the banner regression.py waits for is the bench's"
+    raw = " SYSTOLIC MESH VERIFICATION\n%Error: x.sv:1: Assertion failed in TOP.a: boom\nSIMFAIL: make exited 2\n"
+    assert reg._parse(raw)["status"] == "ASSERT" and "BUILDFAIL" not in raw
+
+
+MIN_TESTS = 12  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
