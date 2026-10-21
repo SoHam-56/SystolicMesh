@@ -39,7 +39,7 @@ module ProcessingElement #(
   localparam int LGK = (K > 1) ? $clog2(K) : 1;
 
 `ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
-  initial if (U > S || U > K) $error("ProcessingElement: U=%0d must not exceed min(K=%0d, %0d)", U, K, S);
+  initial if (U != ((K < S) ? K : S)) $error("ProcessingElement: U=%0d must be min(K=%0d, %0d); fewer slots reuse one before its add lands", U, K, S);
   initial if (COL >= K) $error("ProcessingElement: COL=%0d must be below K=%0d", COL, K);
 `endif
 

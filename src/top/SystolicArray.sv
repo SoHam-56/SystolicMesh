@@ -75,6 +75,9 @@ module SystolicArray #(
   // A continuing pass reads the slots its set's previous pass wrote: with K < S a PE reuses each slot every pass, so the pass waits S cycles.
   localparam int S = sienna_fmt_pkg::add_latency(ACC_DATA_WIDTH) + 1;  // a PE slot is ready S cycles after its add issues
   localparam int GW = $clog2(S + 1);
+`ifndef SYNTHESIS  // the PEs' slot count: fewer slots reuse one within a pass before its add lands, and the spacing below assumes U = K under S
+  initial if (U != ((K < S) ? K : S)) $error("SystolicArray: U=%0d must be min(K=%0d, %0d)", U, K, S);
+`endif
   logic spaced;  // a continuing pass may launch now
   if (K < S) begin : G_SPACE
     logic [GW-1:0] since;  // cycles since the last launch, saturating at S
