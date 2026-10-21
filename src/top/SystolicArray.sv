@@ -296,6 +296,17 @@ module SystolicArray #(
     else if (gap_q < S) gap_q <= gap_q + 1;
   a_continue_spaced: assert property (@(posedge clk_i) disable iff (!rstn_i) (launch && !ob_fresh[fb]) |-> gap_q >= S)
     else $error("SystolicArray: a continuing pass launched %0d cycles after the previous one, its slots need %0d", gap_q, S);
+  // Cover for the benches: continuing passes that were ready to launch under S cycles after the previous launch (the spacing holds them).
+  int early_passes;
+  logic early_q;  // the queued continuing pass was ready early
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) begin
+      early_passes <= 0;
+      early_q <= 1'b0;
+    end else if (launch) begin
+      if (early_q || (!ob_fresh[fb] && gap_q < S)) early_passes <= early_passes + 1;
+      early_q <= 1'b0;
+    end else if (ob_full[fb] && !ob_fresh[fb] && (!feeding || kk == KW'(K - 1)) && gap_q < S) early_q <= 1'b1;
 `endif
 
 endmodule
