@@ -83,7 +83,19 @@ def test_unskipped_mesh_differs():
     assert int(np.sum(plain != alone)) > 0
 
 
-MIN_TESTS = 4  # tests this file holds; fewer run means one was lost, which is a failure
+
+def test_latency_and_product_from_package():
+    """The partial-sum count and the product's width come from sienna_fmt_pkg through fmt_pkg.py, not from constants in mesh_model."""
+    for fmt in ("fp32", "bf16"):
+        f = fpu.FORMATS[fmt]
+        assert mm._slots(f, 64) == mm.fmt_pkg.get(fmt, "ADD_LATENCY") + 1 and mm._slots(f, 2) == 2, fmt
+    one, two = 0x3F800000, 0x40000000
+    assert mm._prod(fpu.FP32, np.array([one]), np.array([two]))[0] == two and mm._prod(fpu.BF16, np.array([one >> 16]), np.array([two >> 16]))[0] == two
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "mesh_model.py")).read()
+    assert "ADD_LAT =" not in src and "f.m ==" not in src, "mesh_model keeps a latency or a format test of its own"
+
+
+MIN_TESTS = 5  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     bad = ran = 0

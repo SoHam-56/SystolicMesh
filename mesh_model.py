@@ -2,27 +2,33 @@
 """Bit-exact model of SystolicMesh's arithmetic in the build's format: each PE sums product n of a set into slot n mod U
 (products counted across a set's passes, the first U adding to +0), then the reducer's pairwise tree adds the U partials of every
 depth slice with the bias as its last input. Operand order as the RTL: mul(A=a, B=b), PE add(A=slot, B=product), tree add(A=left, B=right).
-bf16 multiplies exactly into fp32 (fpMulWiden), sums and the widened bias in fp32 (fp32Adder), and narrows each result once (fpNarrow)."""
+bf16 multiplies exactly into fp32 (bf16WideMultiplier), sums and the widened bias in fp32 (fp32Adder), and narrows each result once (fp32ToBf16)."""
 import os
 import sys
 
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ArithmeticLibrary", "Common", "models"))
+import fmt_pkg  # noqa: E402  the one parser of sienna_fmt_pkg: latencies and widths per format
 import fpu  # noqa: E402
 
-ADD_LAT = 5  # sienna_fmt_pkg::add_lat, every supported format
+
+def _slots(f, depth):
+    """Partial sums per PE: the accumulator add's latency (sienna_fmt_pkg ADD_LATENCY) plus one, at most the depth."""
+    return min(depth, fmt_pkg.get(f.name, "ADD_LATENCY") + 1)
 
 
 def _prod(f, a, b):
-    """The PE's product in the accumulator's format: fp32Multiplier in fp32, fpMulWiden's exact fp32 product in bf16."""
-    return fpu.mul(f, a, b)[0] if f.m == 23 else fpu.mul_widen(f, a, b)[0]
+    """The PE's product at the accumulator's width: fp32Multiplier where the operand is that wide, else the exact widened product (bf16WideMultiplier)."""
+    if fmt_pkg.get(f.name, "DATA_WIDTH") == fmt_pkg.get(f.name, "ACC_DATA_WIDTH"):
+        return fpu.mul(f, a, b)[0]
+    return fpu.mul_widen(f, a, b)[0]
 
 
 def matmul(f, passes, N, T, collapse_k=1, bias=None):
     AK = N if collapse_k else T  # depth of each array's product
     RP = 1 if collapse_k else N // T  # depth slices, one array each
-    U = min(AK, ADD_LAT + 1)
+    U = _slots(f, AK)
     acc = np.zeros((RP, U, N, N), dtype=np.int64)
     g = 0
     for A, B in passes:
@@ -56,7 +62,7 @@ def matmul_packed(f, A, B, N, shift, bias=None):
     A = np.asarray(A, dtype=np.int64)
     B = np.asarray(B, dtype=np.int64)
     b = N >> shift
-    U = min(N, ADD_LAT + 1)
+    U = _slots(f, N)
     acc = np.zeros((U, N, N), dtype=np.int64)
     for c in range(N // b):
         cols = slice(c * b, (c + 1) * b)
