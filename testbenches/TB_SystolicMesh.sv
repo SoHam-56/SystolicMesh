@@ -10,7 +10,9 @@ module TB_SystolicMesh #(
     parameter int HELD_ACCUM    = 0,  // 1: after ACCUMULATE, the held accumulate stage, whose passes launch back to back
     parameter int FAULT = 0,
     parameter int WR    = 0,  // words per result beat; 0 is N
-    parameter int RC    = 0   // the most result credits +res_slots may advertise; 0 is one set's beats
+    parameter int RC    = 0,  // the most result credits +res_slots may advertise; 0 is one set's beats
+    parameter int RESULT_BANKS = 4,  // the mesh's result banks and partial-sum banks per PE, set here so the stages that fill them count them
+    parameter int ACC_BANKS    = 4
 );
 
   // The format is the build's define, through sienna_fmt_pkg.
@@ -123,7 +125,9 @@ module TB_SystolicMesh #(
       .HOST_WORDS (HOST_WORDS),
       .WC_TILES   (WC_TILES),
       .RES_MAX    ((FAULT == 5) ? 1 : RES_CAP),
-      .RES_CRW    (RES_CRW)
+      .RES_CRW    (RES_CRW),
+      .RESULT_BANKS(RESULT_BANKS),
+      .ACC_BANKS  (ACC_BANKS)
   ) dut (
       .clk_i(clk),
       .rstn_i(rstn),
@@ -650,7 +654,7 @@ module TB_SystolicMesh #(
 
   // ── The producer waits: the consumer holds, so no staging credit returns once every bank is full ─────
   // Sets the mesh holds with no result taken: 2 staging banks, 2 operand and ACC_BANKS partial-sum banks per array, RESULT_BANKS.
-  localparam int MESH_SETS = 2 + 2 + 4 + 4;
+  localparam int MESH_SETS = 2 + 2 + ACC_BANKS + RESULT_BANKS;
   localparam int WAIT_CYCLES = TIMEOUT_CYCLES / 4;  // no credit for this long: the mesh is full
 
   task automatic producer_waits_test();
@@ -876,7 +880,7 @@ module TB_SystolicMesh #(
       np++;
     end
     if (np == 0) return;
-    fill = 4 + 4 + res_slots / BEATS;  // RESULT_BANKS, ACC_BANKS and the consumer's whole results
+    fill = RESULT_BANKS + ACC_BANKS + res_slots / BEATS;  // the result and partial-sum banks and the consumer's whole results
     if (np > 4) begin  // the passes must fit the 2 operand and 2 staging banks, or the held host deadlocks
       $display("  [FATAL] Held accumulate: %0d passes, at most 4 fit behind %0d held sets", np, fill);
       $finish;
