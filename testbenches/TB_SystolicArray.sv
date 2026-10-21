@@ -2,14 +2,16 @@
 
 // Unit test for the pipelined SystolicArray: NSETS random N x K by K x N products streamed back to back.
 // The writer loads whenever an operand bank is free and the reader drains whenever a set is final, so sets overlap; each is checked against a real-valued model.
+// The format is the build's define: fp32 and bf16 partials are fp32 within 1e-5 of sum|ab|, int8 partials int32 and exact.
 module TB_SystolicArray #(
     parameter int N        = 4,
     parameter int K        = 4,
     parameter int NSETS    = 8,
     parameter int READ_GAP = 0  // idle cycles the reader waits before each set, to exercise back-pressure
 );
-  localparam int DW = 32;
-  localparam int U = (K < 6) ? K : 6;
+  localparam int DW = sienna_fmt_pkg::DATA_WIDTH, ACC_W = sienna_fmt_pkg::ACC_DATA_WIDTH;
+  localparam bit IS_INT = sienna_fmt_pkg::EXPONENT_WIDTH == 0;  // the bench's own encoder and decoder
+  localparam int U = (K < sienna_fmt_pkg::ADD_LATENCY + 1) ? K : sienna_fmt_pkg::ADD_LATENCY + 1;
 
   logic clk = 0, rstn = 0;
   always #5 clk = ~clk;
@@ -18,13 +20,12 @@ module TB_SystolicArray #(
   logic [N-1:0][DW-1:0] n_data = '0;
   logic [K-1:0][DW-1:0] w_data = '0;
   logic [$clog2(N*N)-1:0] rd_addr = '0;
-  logic [U-1:0][DW-1:0] rd_data;
+  logic [U-1:0][ACC_W-1:0] rd_data;
   logic rd_valid, load_ready, set_final, busy;
 
   SystolicArray #(
       .N          (N),
       .K          (K),
-      .DATA_WIDTH (DW),
       .WEST_WORDS (K),
       .NORTH_WORDS(N),
       .U          (U)
@@ -61,11 +62,24 @@ module TB_SystolicArray #(
     return b[31] ? -v : v;
   endfunction
 
-  // Random fp32 with magnitude in [2^-7, 2): varied exponents, random sign and mantissa.
-  function automatic logic [31:0] rnd();
+  // An operand's value: int8 its signed code; floats the word as the top bits of an fp32.
+  function automatic real op(input logic [DW-1:0] b);
+    if (IS_INT) return real'(int'($signed(b)));
+    return f32(32'(b) << (32 - DW));
+  endfunction
+
+  // A partial sum's value: int32 in int8, fp32 in floats.
+  function automatic real acc(input logic [ACC_W-1:0] b);
+    if (IS_INT) return real'(int'($signed(b)));
+    return f32(32'(b));
+  endfunction
+
+  // Random operand: floats a magnitude in [2^-7, 2) with varied exponents, random sign and mantissa (fp32 as before, bf16 its top half); int8 any code.
+  function automatic logic [DW-1:0] rnd();
     logic [7:0] e;
+    if (IS_INT) return DW'($urandom);
     e = 8'(120 + ($urandom % 8));
-    return {1'($urandom), e, 23'($urandom)};
+    return DW'({1'($urandom), e, 23'($urandom)} >> (32 - DW));
   endfunction
 
   logic [DW-1:0] A[NSETS][N][K], B[NSETS][K][N];
@@ -134,14 +148,14 @@ module TB_SystolicArray #(
         rd_en = 0;
         rel = 0;
         for (int kk = 0; kk < K; kk++) begin
-          automatic real ab = f32(A[s][p/N][kk]) * f32(B[s][kk][p%N]);
+          automatic real ab = op(A[s][p/N][kk]) * op(B[s][kk][p%N]);
           gold += ab;
           mag += (ab < 0) ? -ab : ab;
         end
-        for (int u = 0; u < U; u++) got += f32(rd_data[u]);
+        for (int u = 0; u < U; u++) got += acc(rd_data[u]);
         err = (got > gold) ? got - gold : gold - got;
         checked++;
-        if (!rd_valid || err > 1.0e-5 * mag + 1.0e-12) begin
+        if (!rd_valid || (IS_INT ? err != 0.0 : err > 1.0e-5 * mag + 1.0e-12)) begin
           failed++;
           if (failed < 10) $display("  [FAIL] set %0d pixel %0d: got %f expected %f, err %e", s, p, got, gold, err);
         end
