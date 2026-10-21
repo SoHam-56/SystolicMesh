@@ -72,8 +72,23 @@ module SystolicArray #(
   logic [BANKS-1:0] ab_busy;  // a set was fed into the bank and not yet released
   logic launch;  // a queued set starts feeding this cycle
 
-  // A pass that starts a set needs a free partial-sum bank; a continuing pass adds into the one its set holds.
-  assign launch = ob_full[fb] && (!ob_fresh[fb] || !ab_busy[ab_next]) && (!feeding || kk == KW'(K - 1));
+  // A continuing pass reads the slots its set's previous pass wrote: with K < S a PE reuses each slot every pass, so the pass waits S cycles.
+  localparam int S = sienna_fmt_pkg::add_latency(ACC_DATA_WIDTH) + 1;  // a PE slot is ready S cycles after its add issues
+  localparam int GW = $clog2(S + 1);
+  logic spaced;  // a continuing pass may launch now
+  if (K < S) begin : G_SPACE
+    logic [GW-1:0] since;  // cycles since the last launch, saturating at S
+    always_ff @(posedge clk_i or negedge rstn_i)
+      if (!rstn_i) since <= GW'(S);
+      else if (launch) since <= GW'(1);
+      else if (int'(since) < S) since <= since + 1'b1;
+    assign spaced = ob_fresh[fb] || (int'(since) >= S);
+  end else begin : G_NO_SPACE  // a pass is at least S cycles long, so back-to-back passes are already S apart
+    assign spaced = 1'b1;
+  end
+
+  // A pass that starts a set needs a free partial-sum bank; a continuing pass adds into the one its set holds, once it is spaced.
+  assign launch = ob_full[fb] && (!ob_fresh[fb] || !ab_busy[ab_next]) && (!feeding || kk == KW'(K - 1)) && spaced;
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -270,6 +285,14 @@ module SystolicArray #(
     else $error("SystolicArray: a continuing pass launched with no set holding its bank");
   a_read_final: assert property (@(posedge clk_i) disable iff (!rstn_i) (read_enable_i || release_i) |-> set_final_o)
     else $error("SystolicArray: read or release with no final set");
+  // The PEs' a_slot_ready one level up, on its own counter: a continuing pass launches at least S cycles after the previous launch.
+  int gap_q;
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) gap_q <= S;
+    else if (launch) gap_q <= 1;
+    else if (gap_q < S) gap_q <= gap_q + 1;
+  a_continue_spaced: assert property (@(posedge clk_i) disable iff (!rstn_i) (launch && !ob_fresh[fb]) |-> gap_q >= S)
+    else $error("SystolicArray: a continuing pass launched %0d cycles after the previous one, its slots need %0d", gap_q, S);
 `endif
 
 endmodule
