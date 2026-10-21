@@ -2,6 +2,9 @@ PRJ_DIR = $(shell pwd)
 SRC_DIR = $(PRJ_DIR)/src
 TB_DIR = $(PRJ_DIR)/testbenches
 
+# FMT ?= fp32 (fp32, bf16 or int8; anything else stops make) picks the build's define, FMT_DEF = +define+FMT_<FMT>.
+include $(PRJ_DIR)/ArithmeticLibrary/Common/fmt.mk
+
 # Toolchain
 VERILATOR = verilator
 VCS = vcs
@@ -9,6 +12,10 @@ WAVE = surfer
 
 REGRESSION_SCRIPT = $(PRJ_DIR)/regression.py
 MATRIX_SIZE       ?= 16
+# TB_SystolicMesh's sizes, passed with MATRIX_SIZE as Verilator -G overrides; regression.py sets each test's.
+TILE_SIZE         ?= 4
+NUM_TEST_SETS     ?= 5
+COLLAPSE_K        ?= 1
 REGRESSION_GROUP  ?= all
 FAST              ?= 0
 REGRESSION_OPTS   ?=
@@ -90,6 +97,11 @@ ifeq ($(LARGE_CODE),1)
 VERILATOR_FLAGS += -CFLAGS -mcmodel=large -CFLAGS -fno-pie -LDFLAGS -no-pie
 endif
 
+VERILATOR_FLAGS += $(FMT_DEF)
+ifeq ($(TOP_MODULE),TB_SystolicMesh)
+VERILATOR_FLAGS += -GMATRIX_SIZE=$(MATRIX_SIZE) -GTILE_SIZE=$(TILE_SIZE) -GNUM_TEST_SETS=$(NUM_TEST_SETS) -GCOLLAPSE_K=$(COLLAPSE_K)
+endif
+
 # One-off defines, e.g. EXTRA_FLAGS=-DASSERT_SELFTEST
 VERILATOR_FLAGS += $(EXTRA_FLAGS)
 
@@ -102,7 +114,8 @@ VCS_FLAGS = \
 	+v2k \
 	+incdir+$(SRC_DIR) \
 	+incdir+$(TB_DIR) \
-	+define+VCS$(if $(filter 1,$(TRACE)), +define+ENABLE_TRACE)
+	+define+VCS$(if $(filter 1,$(TRACE)), +define+ENABLE_TRACE) \
+	$(FMT_DEF)
 
 default: verilator
 
