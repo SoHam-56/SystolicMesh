@@ -174,6 +174,16 @@ debug: verilator
 perf: VERILATOR_FLAGS += --stats --profile-cfuncs
 perf: verilator
 
+# check-fmt: no RTL outside the allowlist (the package, the Fmt wrappers, the AriL units) names a precision; C4: a planted EXP_W must fail it.
+FMT_ALLOW = ^ArithmeticLibrary/(Common/src/sienna_fmt_pkg\.sv|Fmt/src/.*|(Adders|Multipliers|Converters|Divider|Requantizer|QuantizedAdder)/.*)$$
+check-fmt:
+	@bash $(PRJ_DIR)/ArithmeticLibrary/Common/check_fmt.sh $(PRJ_DIR) '$(FMT_ALLOW)' && echo "check-fmt OK: the tree passes" || { echo "check-fmt FAIL: the tree"; exit 1; }
+	@t=$$(mktemp -d); mkdir -p $$t/src/top; cp $(SRC_DIR)/top/SystolicMesh.sv $$t/src/top/; \
+	sed -i 's/^endmodule/  localparam int EXP_W = 8;\nendmodule/' $$t/src/top/SystolicMesh.sv; \
+	if bash $(PRJ_DIR)/ArithmeticLibrary/Common/check_fmt.sh $$t '$(FMT_ALLOW)' > $$t/c4.log; then echo "check-fmt FAIL: C4 planted EXP_W passed"; exit 1; \
+	elif ! /usr/bin/grep -q '^check-fmt: 1 RTL files outside the allowlist, 1 naming a precision$$' $$t/c4.log; then echo "check-fmt FAIL: C4 failed for another reason"; cat $$t/c4.log; exit 1; \
+	else echo "check-fmt OK: C4 planted EXP_W in SystolicMesh.sv fails"; fi; rm -rf $$t
+
 clean:
 	@echo "-- Cleaning simulation artifacts"
 	-rm -rf $(VERILATOR_DIR) $(VCS_DIR)
@@ -242,4 +252,4 @@ regression: $(addprefix regression/,$(REG_POINTS))
 regression-summary:
 	@$(REG_SUMMARY)$(if $(REG_RUN), --run $(REG_RUN))
 
-.PHONY: default verilator vcs wave lint debug perf clean mesh-regression regression regression-summary aril-fpu aril-narrow model-tests
+.PHONY: default verilator vcs wave lint debug perf clean mesh-regression regression regression-summary aril-fpu aril-narrow model-tests check-fmt
