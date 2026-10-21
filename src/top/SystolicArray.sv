@@ -197,10 +197,6 @@ module SystolicArray #(
   for (genvar r = 0; r < N; r++) begin : ROW
     for (genvar c = 0; c < N; c++) begin : COL
       ProcessingElement #(
-          .EXP_W     (EXP_W),
-          .MAN_W     (MAN_W),
-          .DATA_WIDTH(DATA_WIDTH),
-          .ACC_W     (ACC_W),
           .K         (K),
           .BANKS     (BANKS),
           .U         (U),

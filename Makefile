@@ -26,14 +26,19 @@ DESIGN_FILES = \
   mem/MeshOutputSram.sv \
   engine/AccumulationUnit.sv \
   engine/ProcessingElement.sv \
+  ../ArithmeticLibrary/Fmt/src/fmt_mul.sv \
+  ../ArithmeticLibrary/Fmt/src/fmt_add.sv \
   ../ArithmeticLibrary/Multipliers/Radix4Booth/src/R4Booth.sv \
   ../ArithmeticLibrary/Multipliers/Karatsuba/src/karatsubaUnsigned.sv \
 	../ArithmeticLibrary/Multipliers/FP32/src/fp32Multiplier.sv \
-  ../ArithmeticLibrary/Multipliers/FPWiden/src/fpMulWiden.sv \
+  ../ArithmeticLibrary/Multipliers/BF16/src/bf16Multiplier.sv \
+  ../ArithmeticLibrary/Multipliers/BF16Wide/src/bf16WideMultiplier.sv \
+  ../ArithmeticLibrary/Multipliers/Int8/src/int8Multiplier.sv \
   ../ArithmeticLibrary/Converters/FPNarrow/src/fpNarrow.sv \
   ../ArithmeticLibrary/Adders/FP32/src/LZC.sv \
   ../ArithmeticLibrary/Adders/FP32/src/fp32Adder.sv \
-  ../ArithmeticLibrary/Multipliers/Int/src/intMultiplier.sv \
+  ../ArithmeticLibrary/Adders/BF16/src/bf16Adder.sv \
+  ../ArithmeticLibrary/Adders/Int32/src/int32Adder.sv \
   ../ArithmeticLibrary/Adders/Int/src/intAdder.sv
 
 TOP_MODULE = TB_SystolicMesh
