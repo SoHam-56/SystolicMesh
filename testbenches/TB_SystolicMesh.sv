@@ -7,6 +7,7 @@ module TB_SystolicMesh #(
     parameter int TILE_SIZE     = 4,
     parameter int NUM_TEST_SETS = 5,
     parameter int COLLAPSE_K    = 1,
+    parameter int HELD_ACCUM    = 0,  // 1: after ACCUMULATE, the held accumulate stage, whose passes launch back to back
     parameter int FAULT = 0,
     parameter int WR    = 0,  // words per result beat; 0 is N
     parameter int RC    = 0   // the most result credits +res_slots may advertise; 0 is one set's beats
@@ -861,6 +862,67 @@ module TB_SystolicMesh #(
     drain_check("accumulate");
   endtask
 
+  // ── Held accumulate: the consumer holds while RESULT_BANKS + ACC_BANKS + its own slots' sets fill the mesh, then the sum's passes ─────
+  // The sum's fresh first pass waits for a partial-sum bank with its next pass in the other operand bank, so on release they launch K apart.
+  task automatic accum_held_pass();
+    string f_a, f_b, f_c;
+    int np, errs, fill;
+    integer fh;
+    np = 0;
+    forever begin
+      fh = $fopen($sformatf("accA_%0d.mem", np), "r");
+      if (!fh) break;
+      $fclose(fh);
+      np++;
+    end
+    if (np == 0) return;
+    fill = 4 + 4 + res_slots / BEATS;  // RESULT_BANKS, ACC_BANKS and the consumer's whole results
+    if (np > 4) begin  // the passes must fit the 2 operand and 2 staging banks, or the held host deadlocks
+      $display("  [FATAL] Held accumulate: %0d passes, at most 4 fit behind %0d held sets", np, fill);
+      $finish;
+    end
+    $display("\n[STAGE] HELD ACCUMULATE: %0d sets fill the mesh with the consumer holding, then one sum over %0d passes", fill, np);
+    res_hold = 1;
+    fork
+      begin
+        for (int q = 0; q < fill; q++) stage_set(q % NUM_TEST_SETS, 1'b0, 0, 1'b0);
+        for (int p = 0; p < np; p++) begin
+          wait_stg_credit();
+          fork
+            load_west_queue($sformatf("accA_%0d.mem", p));
+            load_north_queue($sformatf("accB_%0d.mem", p));
+          join
+          if (p == 0) load_bias("accBias.mem");
+          else begin
+            bias_d = '0;
+            bias_v = 1'b0;
+          end
+          pack_d = '0;
+          stg_put(1'b0, 0, 1'b0, p != np - 1);
+        end
+        res_hold = 0;
+        for (int q = 0; q < fill; q++) begin
+          set_files(q % NUM_TEST_SETS, f_a, f_b, f_c);
+          verify_results(f_c, errs);
+          total_sets_run++;
+          if (errs == 0) sets_passed++;
+          else sets_failed++;
+        end
+        verify_results("accC.mem", errs);
+        total_sets_run++;
+        if (errs == 0) sets_passed++;
+        else sets_failed++;
+      end
+      begin
+        repeat (TIMEOUT_CYCLES * (fill + np + 1)) @(posedge clk);
+        $display("  [FATAL] Timeout in the held accumulate pass");
+        $finish;
+      end
+    join_any
+    disable fork;
+    drain_check("held accumulate");
+  endtask
+
   // ── Top-level stimulus ────────────────────────────────────────────────────
   initial begin
 `ifdef ENABLE_TRACE
@@ -899,6 +961,7 @@ module TB_SystolicMesh #(
     producer_waits_test();
     cache_pass();
     accum_pass();
+    if (HELD_ACCUM != 0) accum_held_pass();
 
     // ── Final report ───────────────────────────────────────────────────────
     $display("\n##############################################");
