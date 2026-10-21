@@ -3,25 +3,23 @@
 // FAULT 1: rows and a staging put with no credit; 2: a cache write after its region's last set, then a cached set on an unfilled region;
 // 3: a result link one bit narrow; 4: wc_last on an uncached set; 5: RES_CRW wider than the mesh's result counter.
 module TB_SystolicMesh #(
+    parameter int MATRIX_SIZE   = 16,  // N; these four come from the Makefile as Verilator -G overrides
+    parameter int TILE_SIZE     = 4,
+    parameter int NUM_TEST_SETS = 5,
+    parameter int COLLAPSE_K    = 1,
     parameter int FAULT = 0,
     parameter int WR    = 0,  // words per result beat; 0 is N
     parameter int RC    = 0   // the most result credits +res_slots may advertise; 0 is one set's beats
 );
 
-  localparam int EXP_W = 8;  // patched by regression.py --format
-  localparam int MAN_W = 23;
-  localparam int COLLAPSE_K = 1;  // patched by regression.py --collapse-k
-  localparam DATA_WIDTH = 1 + EXP_W + MAN_W;
-  localparam int ACC_W = sienna_fmt_pkg::acc_w(EXP_W, MAN_W);  // bias words: int32, or fp32 in every float format
-  localparam int OUT_W = sienna_fmt_pkg::out_w(EXP_W, MAN_W);  // result words: int32 in int8, DATA_WIDTH in floats
+  // The format is the build's define, through sienna_fmt_pkg.
+  localparam int DATA_WIDTH = sienna_fmt_pkg::DATA_WIDTH;  // operand words
+  localparam int ACC_DATA_WIDTH = sienna_fmt_pkg::ACC_DATA_WIDTH;  // bias words and the reducers' sums
+  localparam int RESULT_DATA_WIDTH = sienna_fmt_pkg::RESULT_DATA_WIDTH;  // result words
   localparam CLK_PERIOD = 10;
 
-  localparam MATRIX_SIZE = 16;
-  localparam TILE_SIZE = 4;
   localparam SRAM_SIZE = MATRIX_SIZE * MATRIX_SIZE;
   localparam int HOST_WORDS = MATRIX_SIZE;  // words per host write: one matrix row
-
-  localparam int NUM_TEST_SETS = 5;
 
   // Reset once at time zero only. Resetting per set hides every re-arm defect.
   localparam bit B2B_MODE = 1'b1;
@@ -41,7 +39,7 @@ module TB_SystolicMesh #(
   localparam int WCAW = $clog2(WC_TILES * SRAM_SIZE);
   localparam int HALF = WC_TILES / 2;  // first tile of cache region 1
   localparam int STG_W = WCTW + 7;  // {wc_last, weight_tile, weight_cached, pack_shift[2:0], bias_valid, partial}
-  localparam int RES_W = WIDE_READ * OUT_W + 3;  // {packed, last, first, WIDE_READ words}
+  localparam int RES_W = WIDE_READ * RESULT_DATA_WIDTH + 3;  // {packed, last, first, WIDE_READ words}
   localparam int MAX_RES = 64;  // results one run collects
 
   reg clk, rstn;
@@ -52,9 +50,9 @@ module TB_SystolicMesh #(
   reg wc_we = 1'b0;  // cache write of n_data at wc_addr
   reg [WCAW-1:0] wc_addr = '0;
 
-  reg     [     OUT_W-1:0] expected_mem          [0:SRAM_SIZE-1];
+  reg     [     RESULT_DATA_WIDTH-1:0] expected_mem          [0:SRAM_SIZE-1];
   reg                              bias_v = 1'b0;  // the set's bias (matrixBias<suffix>.mem), taken by the mesh with the put
-  reg [MATRIX_SIZE-1:0][ACC_W-1:0] bias_d = '0;
+  reg [MATRIX_SIZE-1:0][ACC_DATA_WIDTH-1:0] bias_d = '0;
   reg [2:0] pack_d = '0;  // the set's pack shift (packShift<suffix>.mem), taken with the put
 
   credit_link_if #(.DATA_W(STG_W), .CRW(1)) stg ();
@@ -119,11 +117,7 @@ module TB_SystolicMesh #(
   SystolicMesh #(
       .MATRIX_SIZE(MATRIX_SIZE),
       .TILE_SIZE  (TILE_SIZE),
-      .EXP_W      (EXP_W),
-      .MAN_W      (MAN_W),
       .COLLAPSE_K (COLLAPSE_K),
-      .DATA_WIDTH (DATA_WIDTH),
-      .ACC_W      (ACC_W),
       .WIDE_READ  (WIDE_READ),
       .HOST_WORDS (HOST_WORDS),
       .WC_TILES   (WC_TILES),
@@ -164,7 +158,7 @@ module TB_SystolicMesh #(
   logic [RES_W-1:0] res_fifo[$];
   int res_owed = 0;  // slots freed and not yet credited back
   int res_got = 0, res_beat = 0, res_bad = 0;  // results collected, beats of the next one, framing errors
-  logic [OUT_W-1:0] res_store[MAX_RES][SRAM_SIZE];
+  logic [RESULT_DATA_WIDTH-1:0] res_store[MAX_RES][SRAM_SIZE];
   bit res_pk[MAX_RES];
   bit res_hit[SRAM_SIZE];  // elements of the result being collected
 
@@ -184,7 +178,7 @@ module TB_SystolicMesh #(
         $display("  [FAIL] Result %0d beat %0d word %0d: element %0d out of range or pushed twice", res_got, res_beat, k, e);
       end else begin
         res_hit[e] = 1'b1;
-        if (res_got < MAX_RES) res_store[res_got][e] = d[k*OUT_W+:OUT_W];
+        if (res_got < MAX_RES) res_store[res_got][e] = d[k*RESULT_DATA_WIDTH+:RESULT_DATA_WIDTH];
       end
     end
     res_owed++;
@@ -224,19 +218,19 @@ module TB_SystolicMesh #(
   localparam int TPD = MATRIX_SIZE / TILE_SIZE;  // output tiles per dimension, one reducer each
   logic [TPD*TPD-1:0] tr_we;
   logic [TPD*TPD-1:0][31:0] tr_addr;
-  logic [TPD*TPD-1:0][ACC_W-1:0] tr_sum;
+  logic [TPD*TPD-1:0][ACC_DATA_WIDTH-1:0] tr_sum;
   for (genvar ti = 0; ti < TPD; ti++) begin : TR_ROW
     for (genvar tj = 0; tj < TPD; tj++) begin : TR_COL
       assign tr_we[ti*TPD+tj]   = dut.sram_we_agg[ti*TPD+tj];
       assign tr_addr[ti*TPD+tj] = dut.sram_addr_agg[ti*TPD+tj];
-      if (EXP_W == 8 && MAN_W == 7) begin : G_BF16  // bf16: the fp32 sum going into the reducer's fpNarrow
-        assign tr_sum[ti*TPD+tj] = dut.ROW[ti].COL[tj].acc_unit.G_NARROW.NARROW.x_i;
-      end else begin : G_SAME  // fp32 and int8 write the sum itself
-        assign tr_sum[ti*TPD+tj] = ACC_W'(dut.sram_data_agg[ti*TPD+tj]);
+      if (RESULT_DATA_WIDTH != ACC_DATA_WIDTH) begin : G_NARROW  // a narrower result (bf16): the sum going into the reducer's fp32ToBf16
+        assign tr_sum[ti*TPD+tj] = dut.ROW[ti].COL[tj].acc_unit.G_NARROW.NARROW.fp32_i;
+      end else begin : G_SAME  // the reducer writes the sum itself
+        assign tr_sum[ti*TPD+tj] = ACC_DATA_WIDTH'(dut.sram_data_agg[ti*TPD+tj]);
       end
     end
   end
-  logic [ACC_W-1:0] sum_store[MAX_RES][SRAM_SIZE];  // per result in write order: each element's sum
+  logic [ACC_DATA_WIDTH-1:0] sum_store[MAX_RES][SRAM_SIZE];  // per result in write order: each element's sum
   int sum_n[SRAM_SIZE];  // results written so far, per element
   integer tr_fd;
   initial tr_fd = $fopen("truth_dump.txt", "w");
@@ -365,7 +359,7 @@ module TB_SystolicMesh #(
 
   task verify_results(input string filename, output int err_count);
     integer fh, i, res;
-    reg [OUT_W-1:0] exp_val, actual_val;
+    reg [RESULT_DATA_WIDTH-1:0] exp_val, actual_val;
     begin
       $display("  [Verify] Checking against %s...", filename);
       fh = $fopen(filename, "r");
@@ -425,14 +419,14 @@ module TB_SystolicMesh #(
     end
   endtask
 
-  // ── Per-set bias: the mesh samples bias_i with the put; matrixBias<suffix>.mem holds ACC_W words (floats widened to fp32) ────────
+  // ── Per-set bias: the mesh samples bias_i with the put; matrixBias<suffix>.mem holds ACC_DATA_WIDTH words (floats widened to fp32) ────────
   task automatic drive_bias(input int s);
     load_bias((NUM_TEST_SETS == 1) ? "matrixBias.mem" : $sformatf("matrixBias_%0d.mem", s));
   endtask
 
   task automatic load_bias(input string f);  // no file: no bias
     integer fh, res;
-    reg [ACC_W-1:0] tmp;
+    reg [ACC_DATA_WIDTH-1:0] tmp;
     bias_d = '0;
     bias_v = 1'b0;
     fh = $fopen(f, "r");
@@ -887,8 +881,8 @@ module TB_SystolicMesh #(
     $display(" Tile Size:      %0d x %0d", TILE_SIZE, TILE_SIZE);
     $display(" Tiles in mesh:  %0d x %0d", MATRIX_SIZE / TILE_SIZE, MATRIX_SIZE / TILE_SIZE);
     $display(" Sets to Run:    %0d", NUM_TEST_SETS);
-    $display(" Format:         EXP_W=%0d MAN_W=%0d, %0d-bit operands, %0d-bit bias, %0d-bit results", EXP_W, MAN_W, DATA_WIDTH, ACC_W,
-             OUT_W);
+    $display(" Format:         EXP_W=%0d MAN_W=%0d, %0d-bit operands, %0d-bit bias, %0d-bit results", sienna_fmt_pkg::EXPONENT_WIDTH,
+             sienna_fmt_pkg::MANTISSA_WIDTH, DATA_WIDTH, ACC_DATA_WIDTH, RESULT_DATA_WIDTH);
     $display(" Result link:    %0d words per beat, %0d beats per set, %0d slots, %0d%% stalls", WIDE_READ, BEATS, res_slots,
              stall_pct);
     $display(" Compare:        bit-exact against mesh_model (a diagnostic, still required); regression.py gates on the true function");
