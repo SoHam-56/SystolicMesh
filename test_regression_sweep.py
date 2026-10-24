@@ -99,7 +99,8 @@ def test_verdicts():
     tests = "ALL PASS\nALL 13 PASSED\nALL 4 PASSED\nALL 3 PASSED\n"
     assert v("model-tests", tests) == "PASS" and v("model-tests", tests.replace("ALL 4 PASSED\n", "")) == "FAIL (3 of 4 model test files passed)"
     assert v("aril-fpu", "RESULT: PASSED\n") == "PASS" and v("aril-fpu", "done\n") == "FAIL (no 'RESULT: PASSED')"
-    narrow = "RESULT: PASSED\nfpNarrow lint (MAN_W 7, 23): 0 warnings, 0 errors\nbad_format OK: fired\n"
+    narrow = ("fp32ToBf16: 40 corners against their table, 1196608 values against round to nearest even (tie sweep 196608, random 1000000), 0 errors\n"
+              "RESULT: PASSED\nlint fp32ToBf16: 0 warnings, 0 errors\n")
     assert v("aril-narrow", narrow) == "PASS" and v("aril-narrow", narrow + "RESULT: FAILED\n").startswith("FAIL")
 
 

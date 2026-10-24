@@ -88,7 +88,7 @@ Multiply-accumulates per cycle do not depend on the clock, so they compare desig
 
 Before the simulations, the regression checks the models against references of their own, so a rounding bug shared by the RTL and `mesh_model.py` still fails:
 - the fp32-to-bf16 rounding model against hand-derived corners and an integer round-to-nearest-even;
-- the `fpNarrow` RTL against those corners and the model on 1.2 million values;
+- the `fp32ToBf16` RTL against those corners and the model on 1.2 million values;
 - `mesh_model.py` against float64 over 640 terms, and the stimulus words (`make model-tests`).
 
 `make regression` runs these checks once; `mesh-regression` runs them before its simulations, and `--no-checks` skips them there.

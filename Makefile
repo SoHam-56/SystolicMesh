@@ -218,7 +218,7 @@ aril-fpu:
 	$(MAKE) -C $(PRJ_DIR)/ArithmeticLibrary/Common fpu
 
 aril-narrow:
-	$(MAKE) -C $(PRJ_DIR)/ArithmeticLibrary/Converters/FPNarrow all
+	$(MAKE) -C $(PRJ_DIR)/ArithmeticLibrary/Converters/FP32ToBF16 check lint
 
 model-tests:
 	cd $(PRJ_DIR) && $(PYTHON) test_mesh_model_packed.py && $(PYTHON) test_stim_format.py && $(PYTHON) test_regression_parse.py && $(PYTHON) test_regression_sweep.py

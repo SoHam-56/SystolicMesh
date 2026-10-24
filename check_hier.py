@@ -8,10 +8,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-UNITS = {  # every arithmetic unit of ArithmeticLibrary: per-format units, generic units and the int8-only units
+UNITS = {  # every arithmetic unit of ArithmeticLibrary: per-format units, the generic integer units and the int8-only units
     "fp32Multiplier", "fp32Adder", "fp32Divider", "bf16Multiplier", "bf16Adder", "bf16WideMultiplier", "fp32ToBf16",
-    "int8Multiplier", "int16Multiplier", "int24Multiplier", "int32Adder", "fpMultiplier", "fpAdder", "fpMulWiden", "fpNarrow",
-    "intMultiplier", "intAdder", "fxMac", "int8Requantizer", "int8QuantizedAdder",
+    "int8Multiplier", "int16Multiplier", "int24Multiplier", "int32Adder", "intMultiplier", "intAdder", "int8Requantizer", "int8QuantizedAdder",
 }
 EXPECTED = {  # the mesh's units per precision: product into the accumulator, the accumulator add, and the narrowing where the result is narrower
     "fp32": {"fp32Multiplier", "fp32Adder"},

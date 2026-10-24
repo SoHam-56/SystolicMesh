@@ -669,7 +669,7 @@ class MeshSpec(regress.Spec):
         if name == "aril-fpu":
             return regress.marker_verdict(text, rc, (r"^RESULT: PASSED",), (r"RESULT: FAILED",))
         if name == "aril-narrow":
-            return regress.marker_verdict(text, rc, (r"^RESULT: PASSED", r"^bad_format OK:", r"^fpNarrow lint \(MAN_W 7, 23\): 0 warnings, 0 errors$"),
+            return regress.marker_verdict(text, rc, (r"^RESULT: PASSED", r"^fp32ToBf16: \d+ corners .* 0 errors", r"^lint fp32ToBf16: 0 warnings, 0 errors$"),
                                           (r"RESULT: FAILED",))
         s, m = re.findall(r"^\s*Simulations\s*:\s*(\d+)\s*$", text, re.M), re.findall(r"^\s*Passed\s*:\s*(\d+)\s*$", text, re.M)
         g = re.findall(r"^\s*TRUTH: (\d+) simulations gated, (\d+) with misses$", text, re.M)
