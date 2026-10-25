@@ -41,9 +41,10 @@ from datetime import datetime
 
 import numpy as np
 
-from conv_tests import CONV_NUM_SETS, CONV_TESTS
-from matmul_tests import MATMUL_NUM_SETS, MATMUL_TESTS, pow2_tile_sizes
-import stim_format
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts"))  # the test lists, the stimulus writer and the model
+from conv_tests import CONV_NUM_SETS, CONV_TESTS  # noqa: E402
+from matmul_tests import MATMUL_NUM_SETS, MATMUL_TESTS, pow2_tile_sizes  # noqa: E402
+import stim_format  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ArithmeticLibrary", "Common", "models"))
 import truth  # noqa: E402  AriL's true-function gate: the mesh's sums against the float64 sum of its operands
