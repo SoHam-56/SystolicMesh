@@ -204,8 +204,7 @@ mesh-regression:
 		--matrix-size $(MATRIX_SIZE) \
 		--group $(REGRESSION_GROUP) \
 		$(_FAST_FLAG) \
-		$(if $(filter vcs,$(SIM)),--sim vcs) \
-		$(REGRESSION_OPTS)
+		$(REGRESSION_OPTS)$(if $(filter vcs,$(SIM)), --sim vcs)
 
 # Checks against their own references (hand corners, an integer RNE, float64), which a rounding bug shared by an RTL unit and its model fails.
 aril-fpu:
