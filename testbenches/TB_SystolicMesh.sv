@@ -171,7 +171,7 @@ module TB_SystolicMesh #(
     bit pk, last, first;
     int e;
     {pk, last, first} = d[RES_W-1-:3];
-    if (first != (res_beat == 0) || last != (res_beat == BEATS - 1)) begin
+    if ($isunknown(d[RES_W-1-:3]) || first != (res_beat == 0) || last != (res_beat == BEATS - 1)) begin
       res_bad++;
       $display("  [FAIL] Result %0d beat %0d: first=%0b last=%0b", res_got, res_beat, first, last);
     end
@@ -510,7 +510,7 @@ module TB_SystolicMesh #(
   // Every link idle: the host holds both staging and both region credits, the mesh every result credit.
   task automatic drain_check(input string pass);
     repeat (TILE_SIZE + 20) @(negedge clk);
-    if (stg_cnt != 2 || wc_has != 2'b11 || int'(dut.res_cnt) != res_slots || res_fifo.size() != 0)
+    if (stg_cnt !== 2 || wc_has !== 2'b11 || $isunknown(dut.res_cnt) || int'(dut.res_cnt) != res_slots || res_fifo.size() != 0)
       $display("  [FAIL] %s: links not drained: staging credits %0d of 2, region credits %b, result credits %0d of %0d", pass, stg_cnt,
                wc_has, dut.res_cnt, res_slots);
     drained = 1'b1;
@@ -681,7 +681,7 @@ module TB_SystolicMesh #(
           stage_set(q % NUM_TEST_SETS, 1'b0, 0, 1'b0);
           q++;
         end
-        if (q != held || dut.in_full != 2'b11)
+        if (q != held || dut.in_full !== 2'b11)
           $display("  [FAIL] Producer waits: %0d sets taken with the consumer holding, expected %0d (staging banks full %b)", q,
                    held, dut.in_full);
         else $display("  [Overrun] %0d sets held; the host had no staging credit for %0d cycles and put nothing", q, WAIT_CYCLES);
