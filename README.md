@@ -81,7 +81,7 @@ Multiply-accumulates per cycle do not depend on the clock, so they compare desig
 
 ## Verification
 
-`make regression` runs every test at every size: 8 × 8, 16 × 16, 32 × 32 and 64 × 64, every tile size each allows, in fp32, bf16 and int8. It generates the stimulus, builds once per tile size, and compares every output with `mesh_model.py`, a bit-exact model of the mesh's arithmetic. Every output matches:
+`make regression` runs every test at every size: 8 × 8, 16 × 16, 32 × 32 and 64 × 64, every tile size each allows, in fp32, bf16 and int8. It generates the stimulus, builds once per tile size, and compares every output with `scripts/mesh_model.py`, a bit-exact model of the mesh's arithmetic. Every output matches:
 - 11 matrix-multiply tests and the convolution tests (im2col), 19 to 23 sets each;
 - every tile size;
 - 8 × 8 to 32 × 32 in fp32, bf16 and int8 at every tile size; 64 × 64 in fp32 at every tile size, and in bf16 and int8 at tile size 16 (their other 64 × 64 tile sizes not yet run); collapse-k 0 at 8 × 8 and 16 × 16 at every tile size and at 32 × 32 tile size 8 in all three formats.
@@ -124,12 +124,14 @@ How `make regression` works:
 `mesh-regression`'s results go to `testbenches/results/readiness/`. To run one test by hand:
 
 ```bash
-python3 matmul_tests.py --list                      # or conv_tests.py
-python3 matmul_tests.py --gen mm_random --matrix-size 16
+python3 scripts/matmul_tests.py --list              # or scripts/conv_tests.py
+python3 scripts/matmul_tests.py --gen mm_random --matrix-size 16
 make                                                # build and simulate with Verilator
 ```
 
-`regression.py` drives the regression, `matmul_tests.py` and `conv_tests.py` generate stimulus, and `mesh_model.py` is the reference.
+`regression.py` drives the regression, `scripts/matmul_tests.py` and `scripts/conv_tests.py` generate stimulus, and `scripts/mesh_model.py` is the reference.
+
+The layout: `src/` holds the RTL by function (`engine`: the processing element and accumulation unit; `mem`: the output SRAM; `top`: SystolicArray and SystolicMesh), `testbenches/top/` TB_SystolicMesh, `testbenches/units/` TB_PE, TB_PE_pack and TB_SystolicArray (`make TOP_MODULE=TB_PE` builds one), and `scripts/` the model, the stimulus writers, the hierarchy check and the self-tests.
 
 ## Standalone machine
 
