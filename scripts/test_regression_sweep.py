@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # regression.py, at the repository root
 import regression as reg  # noqa: E402
 
 ROOT = reg.ROOT
@@ -86,7 +87,7 @@ def test_commands():
     assert f"-j {cores} --build-jobs {cores} " in make_n("verilator"), "Verilator takes every core"
     assert "--trace" not in make_n("verilator") and "--trace -DENABLE_TRACE" in make_n("verilator", "TRACE=1")  # no waveform by default
     assert "verilator TRACE=1" in make_n("wave"), "make wave builds with TRACE=1"
-    tb = open(os.path.join(ROOT, "testbenches", "TB_SystolicMesh.sv")).read()
+    tb = open(os.path.join(ROOT, "testbenches", "top", "TB_SystolicMesh.sv")).read()
     assert re.search(r"`ifdef ENABLE_TRACE\s+\$dumpfile\([^)]*\);\s+\$dumpvars\([^)]*\);\s+`endif", tb), "the TB dumps only in a TRACE=1 build"
 
 
@@ -107,7 +108,7 @@ def test_build_config():
     assert "+define+FMT_FP32 " in dflt and "-GMATRIX_SIZE=16 -GTILE_SIZE=4 -GNUM_TEST_SETS=5 -GCOLLAPSE_K=1" in dflt, dflt[-300:]  # the bench's defaults
     assert "-GMATRIX_SIZE" not in make_n("verilator", "TOP_MODULE=TB_PE").stdout  # the sizes are TB_SystolicMesh's only
     assert make_n("verilator", "FMT=fp16").returncode != 0 and make_n("lint", "FMT=bf16 int8").returncode != 0
-    tb = open(os.path.join(ROOT, "testbenches", "TB_SystolicMesh.sv")).read()
+    tb = open(os.path.join(ROOT, "testbenches", "top", "TB_SystolicMesh.sv")).read()
     for k in ("MATRIX_SIZE", "TILE_SIZE", "NUM_TEST_SETS", "COLLAPSE_K"):
         assert re.search(rf"^\s*parameter int {k}\s*=", tb, re.M) and not re.search(rf"localparam\s+(int\s+)?{k}\s*=", tb), k
     src = open(os.path.join(ROOT, "regression.py")).read()

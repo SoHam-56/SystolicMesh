@@ -6,6 +6,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # regression.py, at the repository root
 import regression as reg  # noqa: E402
 
 CLEAN = """ Passed Sets:    23
@@ -171,9 +172,9 @@ def truth_text(res):
 
 def test_assert_stop_is_not_a_build_failure():
     """A simulation stopped by a firing assertion reports ASSERT and is not taken for a build failure that skips the configuration's other tests."""
-    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "regression.py")).read()
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "regression.py")).read()
     assert "'SIMFAIL' if SIM_STARTED in out else 'BUILDFAIL'" in src and reg.SIM_STARTED == "SYSTOLIC MESH VERIFICATION"
-    tb = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "testbenches", "TB_SystolicMesh.sv")).read()
+    tb = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "testbenches", "top", "TB_SystolicMesh.sv")).read()
     assert reg.SIM_STARTED in tb, "the banner regression.py waits for is the bench's"
     raw = " SYSTOLIC MESH VERIFICATION\n%Error: x.sv:1: Assertion failed in TOP.a: boom\nSIMFAIL: make exited 2\n"
     assert reg._parse(raw)["status"] == "ASSERT" and "BUILDFAIL" not in raw

@@ -7,7 +7,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # the SystolicMesh repository
 UNITS = {  # every arithmetic unit of ArithmeticLibrary: per-format units, the generic integer units and the int8-only units
     "fp32Multiplier", "fp32Adder", "fp32Divider", "bf16Multiplier", "bf16Adder", "bf16WideMultiplier", "fp32ToBf16",
     "int8Multiplier", "int16Multiplier", "int24Multiplier", "int32Adder", "intMultiplier", "intAdder", "int8Requantizer", "int8QuantizedAdder",
@@ -37,7 +37,7 @@ def elaborate(fmt: str, ck: int, files: list, verilator: str, out: str) -> str:
     # the bench is the top: Verilator cannot elaborate a top with interface ports, and the bench instantiates only the mesh's units
     cmd = [verilator, "--xml-only", "--xml-output", x, "--timing", "-Wno-fatal", "-Wno-lint", "-Wno-style", *d, "--top-module", "TB_SystolicMesh",
            "-GMATRIX_SIZE=8", "-GTILE_SIZE=2", f"-GCOLLAPSE_K={ck}", "--Mdir", os.path.join(out, f"obj_{fmt}_ck{ck}"), *files,
-           os.path.join(ROOT, "testbenches", "TB_SystolicMesh.sv")]
+           os.path.join(ROOT, "testbenches", "top", "TB_SystolicMesh.sv")]
     r = subprocess.run(cmd, cwd=os.path.join(ROOT, "src"), capture_output=True, text=True)
     if r.returncode != 0:
         errs = [ln for ln in (r.stdout + r.stderr).splitlines() if ln.startswith("%Error")]
