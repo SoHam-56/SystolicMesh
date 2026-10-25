@@ -46,7 +46,7 @@ from conv_tests import CONV_NUM_SETS, CONV_TESTS  # noqa: E402
 from matmul_tests import MATMUL_NUM_SETS, MATMUL_TESTS, pow2_tile_sizes  # noqa: E402
 import stim_format  # noqa: E402
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ArithmeticLibrary", "Common", "models"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ArithmeticLibrary", "models"))
 import truth  # noqa: E402  AriL's true-function gate: the mesh's sums against the float64 sum of its operands
 import fourstate  # noqa: E402  4-state safe parsing: an x or z word or count fails its test by name
 
@@ -626,7 +626,7 @@ def main() -> None:
 def _engine():
     """The library's make regression engine, under its own name (SIENNA and GPNAE each have a regression.py too)."""
     import importlib.util
-    s = importlib.util.spec_from_file_location("aril_regress", os.path.join(ROOT, "ArithmeticLibrary", "Common", "regress.py"))
+    s = importlib.util.spec_from_file_location("aril_regress", os.path.join(ROOT, "ArithmeticLibrary", "scripts", "regress.py"))
     m = importlib.util.module_from_spec(s)
     s.loader.exec_module(m)
     return m
@@ -665,7 +665,7 @@ class MeshSpec(regress.Spec):
     def argv(self, name, opts):
         p, vcs = self.parse(name), ["SIM=vcs"] if self.sim == "vcs" else []
         if p["kind"] == "aril-narrow" and self.sim == "vcs":  # fp32ToBf16's bench on VCS; its VCS lint is ArithmeticLibrary's own lint point
-            return ["make", "-C", "ArithmeticLibrary/Converters/FP32ToBF16", "check", "SIM=vcs"]
+            return ["make", "-C", "ArithmeticLibrary", "fp32ToBf16-check", "SIM=vcs"]
         if p["kind"] != "mesh":
             return ["make", p["kind"]] + ([f"PYTHON={sys.executable}"] if p["kind"] == "model-tests" else [])
         held = " --held-accum --group matmul" if p["held"] else ""  # the held stage runs in mm_accum, a matmul test

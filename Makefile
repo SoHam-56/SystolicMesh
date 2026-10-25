@@ -3,9 +3,9 @@ SRC_DIR = $(PRJ_DIR)/src
 TB_DIR = $(PRJ_DIR)/testbenches
 
 # FMT ?= fp32 (fp32, bf16 or int8; anything else stops make) picks the build's define, FMT_DEF = +define+FMT_<FMT>.
-include $(PRJ_DIR)/ArithmeticLibrary/Common/fmt.mk
+include $(PRJ_DIR)/ArithmeticLibrary/scripts/fmt.mk
 # SIM ?= verilator, or vcs (ArithmeticLibrary's sim.mk: plain VCS builds; TRACE=1, XPROP=1, RANDINIT=1); make vcs runs TB_SystolicMesh on VCS.
-include $(PRJ_DIR)/ArithmeticLibrary/Common/sim.mk
+include $(PRJ_DIR)/ArithmeticLibrary/scripts/sim.mk
 
 # Toolchain
 VERILATOR = verilator
@@ -28,28 +28,28 @@ PYTHON            ?= python3
 _FAST_FLAG = $(if $(filter 1,$(FAST)),--fast)
 
 DESIGN_FILES = \
-  ../ArithmeticLibrary/Common/src/sienna_fmt_pkg.sv \
-  ../ArithmeticLibrary/Common/src/credit_link_if.sv \
-  ../ArithmeticLibrary/Common/src/credit_counter.sv \
-  ../ArithmeticLibrary/Common/src/credit_link_checker.sv \
+  ../ArithmeticLibrary/src/fmt/sienna_fmt_pkg.sv \
+  ../ArithmeticLibrary/src/credit/credit_link_if.sv \
+  ../ArithmeticLibrary/src/credit/credit_counter.sv \
+  ../ArithmeticLibrary/src/credit/credit_link_checker.sv \
   top/SystolicMesh.sv \
   top/SystolicArray.sv \
   mem/MeshOutputSram.sv \
   engine/AccumulationUnit.sv \
   engine/ProcessingElement.sv \
-  ../ArithmeticLibrary/Fmt/src/fmt_mul.sv \
-  ../ArithmeticLibrary/Fmt/src/fmt_add.sv \
-  ../ArithmeticLibrary/Multipliers/Radix4Booth/src/R4Booth.sv \
-  ../ArithmeticLibrary/Multipliers/Karatsuba/src/karatsubaUnsigned.sv \
-	../ArithmeticLibrary/Multipliers/FP32/src/fp32Multiplier.sv \
-  ../ArithmeticLibrary/Multipliers/BF16/src/bf16Multiplier.sv \
-  ../ArithmeticLibrary/Multipliers/BF16Wide/src/bf16WideMultiplier.sv \
-  ../ArithmeticLibrary/Multipliers/Int8/src/int8Multiplier.sv \
-  ../ArithmeticLibrary/Converters/FP32ToBF16/src/fp32ToBf16.sv \
-  ../ArithmeticLibrary/Adders/FP32/src/LZC.sv \
-  ../ArithmeticLibrary/Adders/FP32/src/fp32Adder.sv \
-  ../ArithmeticLibrary/Adders/BF16/src/bf16Adder.sv \
-  ../ArithmeticLibrary/Adders/Int32/src/int32Adder.sv
+  ../ArithmeticLibrary/src/fmt/fmt_mul.sv \
+  ../ArithmeticLibrary/src/fmt/fmt_add.sv \
+  ../ArithmeticLibrary/src/multipliers/R4Booth.sv \
+  ../ArithmeticLibrary/src/multipliers/karatsubaUnsigned.sv \
+  ../ArithmeticLibrary/src/multipliers/fp32Multiplier.sv \
+  ../ArithmeticLibrary/src/multipliers/bf16Multiplier.sv \
+  ../ArithmeticLibrary/src/multipliers/bf16WideMultiplier.sv \
+  ../ArithmeticLibrary/src/multipliers/int8Multiplier.sv \
+  ../ArithmeticLibrary/src/converters/fp32ToBf16.sv \
+  ../ArithmeticLibrary/src/adders/LZC.sv \
+  ../ArithmeticLibrary/src/adders/fp32Adder.sv \
+  ../ArithmeticLibrary/src/adders/bf16Adder.sv \
+  ../ArithmeticLibrary/src/adders/int32Adder.sv
 
 TOP_MODULE = TB_SystolicMesh
 # TB_SystolicMesh is the top bench (testbenches/top); TB_PE, TB_PE_pack and TB_SystolicArray are unit benches (testbenches/units)
@@ -174,12 +174,12 @@ perf: VERILATOR_FLAGS += --stats --profile-cfuncs
 perf: verilator
 
 # check-fmt: no RTL outside the allowlist (the package, the Fmt wrappers, the AriL units) names a precision; C4: a planted EXP_W must fail it.
-FMT_ALLOW = ^ArithmeticLibrary/(Common/src/sienna_fmt_pkg\.sv|Fmt/src/.*|(Adders|Multipliers|Converters|Divider|Requantizer|QuantizedAdder)/.*)$$
+FMT_ALLOW = ^ArithmeticLibrary/src/(fmt|adders|multipliers|converters|dividers|quantized)/.*$$
 check-fmt:
-	@bash $(PRJ_DIR)/ArithmeticLibrary/Common/check_fmt.sh $(PRJ_DIR) '$(FMT_ALLOW)' && echo "check-fmt OK: the tree passes" || { echo "check-fmt FAIL: the tree"; exit 1; }
+	@bash $(PRJ_DIR)/ArithmeticLibrary/scripts/check_fmt.sh $(PRJ_DIR) '$(FMT_ALLOW)' && echo "check-fmt OK: the tree passes" || { echo "check-fmt FAIL: the tree"; exit 1; }
 	@t=$$(mktemp -d); mkdir -p $$t/src/top; cp $(SRC_DIR)/top/SystolicMesh.sv $$t/src/top/; \
 	sed -i 's/^endmodule/  localparam int EXP_W = 8;\nendmodule/' $$t/src/top/SystolicMesh.sv; \
-	if bash $(PRJ_DIR)/ArithmeticLibrary/Common/check_fmt.sh $$t '$(FMT_ALLOW)' > $$t/c4.log; then echo "check-fmt FAIL: C4 planted EXP_W passed"; exit 1; \
+	if bash $(PRJ_DIR)/ArithmeticLibrary/scripts/check_fmt.sh $$t '$(FMT_ALLOW)' > $$t/c4.log; then echo "check-fmt FAIL: C4 planted EXP_W passed"; exit 1; \
 	elif ! /usr/bin/grep -q '^check-fmt: 1 RTL files outside the allowlist, 1 naming a precision$$' $$t/c4.log; then echo "check-fmt FAIL: C4 failed for another reason"; cat $$t/c4.log; exit 1; \
 	else echo "check-fmt OK: C4 planted EXP_W in SystolicMesh.sv fails"; fi; rm -rf $$t
 
@@ -209,10 +209,10 @@ mesh-regression:
 
 # Checks against their own references (hand corners, an integer RNE, float64), which a rounding bug shared by an RTL unit and its model fails.
 aril-fpu:
-	$(MAKE) -C $(PRJ_DIR)/ArithmeticLibrary/Common fpu
+	$(MAKE) -C $(PRJ_DIR)/ArithmeticLibrary common-fpu
 
 aril-narrow:
-	$(MAKE) -C $(PRJ_DIR)/ArithmeticLibrary/Converters/FP32ToBF16 check lint
+	$(MAKE) -C $(PRJ_DIR)/ArithmeticLibrary fp32ToBf16-check fp32ToBf16-lint
 
 model-tests:
 	cd $(PRJ_DIR) && $(PYTHON) scripts/test_mesh_model_packed.py && $(PYTHON) scripts/test_stim_format.py && $(PYTHON) scripts/test_regression_parse.py && $(PYTHON) scripts/test_regression_sweep.py

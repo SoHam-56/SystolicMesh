@@ -20,7 +20,7 @@ def test_vcs_commands():
     spec.sim = "vcs"
     a = spec.argv("bf16/N8_T2/mesh-held", None)
     assert a[-1] == "SIM=vcs" and a[:3] == ["make", "mesh-regression", "MATRIX_SIZE=8"] and reg.SPEC.argv("bf16/N8_T2/mesh-held", None) == a[:-1], a
-    assert spec.argv("aril-narrow", None) == ["make", "-C", "ArithmeticLibrary/Converters/FP32ToBF16", "check", "SIM=vcs"]
+    assert spec.argv("aril-narrow", None) == ["make", "-C", "ArithmeticLibrary", "fp32ToBf16-check", "SIM=vcs"]
     env = {k: x for k, x in os.environ.items() if not k.startswith("MAKE") and k != "SIM"}
     run = lambda *x: subprocess.run(["make", "-s", "-n", *x], cwd=ROOT, capture_output=True, text=True, env=env)
     r = run(*a[1:])

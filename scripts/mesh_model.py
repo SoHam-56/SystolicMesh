@@ -8,7 +8,7 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ArithmeticLibrary", "Common", "models"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ArithmeticLibrary", "models"))
 import fmt_pkg  # noqa: E402  the one parser of sienna_fmt_pkg: latencies and widths per format
 import fpu  # noqa: E402
 
