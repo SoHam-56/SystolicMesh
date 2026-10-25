@@ -112,6 +112,8 @@ make mesh-regression MATRIX_SIZE=32 REGRESSION_OPTS="--format int8 --tiles 4"
 make mesh-regression MATRIX_SIZE=16 REGRESSION_OPTS="--format bf16 --collapse-k 0"
 ```
 
+Activate the venv in the shell that runs make: some checks call `python3` directly, and without the venv that is the system's Python, which may lack NumPy.
+
 How `make regression` works:
 - It is a list of *points*: the model checks (`model-tests`, `aril-fpu`, `aril-narrow`), and two per format, N and tile size: `bf16/N8_T2/mesh` (full-depth arrays, collapse-k 1) and `bf16/N8_T2/mesh-ck0` (depth slices and the reduce tree, collapse-k 0). `python3 regression.py --action points` lists them.
 - Each point is its own make target, so `make -j4 regression SMALL=1` runs four at a time, each simulating on a quarter of the cores; `make regression/bf16/N8_T2/mesh` runs one alone. `SMALL=1` and `FMT=int8` on make's command line narrow it.
@@ -137,8 +139,8 @@ Everything here runs on any Linux machine; nothing depends on the authors' serve
 
 ```bash
 git clone --recursive https://github.com/SoHam-56/SystolicMesh.git && cd SystolicMesh
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-make -j4 regression SMALL=1 PYTHON=$PWD/.venv/bin/python
+python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt   # every make below runs in this shell
+make -j4 regression SMALL=1
 ```
 
 **Choosing N in `make -jN`:** use the per-point peaks above (collapse-k 1 about 0.4 GB at N = 8 and 1 GB at 16; collapse-k 0 about 0.8 GB at 8 and 6 GB at 16), so `SMALL=1` at `-j4` fits in 32 GB and one point at a time in 16 GB. Nothing is skipped.
