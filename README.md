@@ -133,7 +133,7 @@ make                                                # build and simulate with Ve
 
 Everything here runs on any Linux machine; nothing depends on the authors' servers.
 
-**You need:** GNU make, git, a C++ compiler with C++20 coroutines (g++ 10 or later), Verilator built with that compiler (tested: 5.035 for every regression, and the released 5.052), and Python 3 with the packages in `requirements.txt` (tested with Python 3.11).
+**You need:** GNU make, git, a C++ compiler with C++20 coroutines (g++ 10 or later), Verilator 5.035 built with that compiler (the version every regression runs on), and Python 3 with the packages in `requirements.txt` (tested with Python 3.11). The released Verilator 5.052 is not supported yet: it runs SystolicMesh's regression and SIENNA's fp32 and int8 points, but stops on bf16 builds (gpnae_tail.sv), on GPNAE's lane bench (a zero-delay warning in TB_gpnae) and on the lint gates (its new warnings, and its removal of --xml-only, which check-hier reads). A Verilator configured with a g++ older than 10 omits the `-fcoroutines` its `--timing` builds need: put a `g++` wrapper that adds it first on `PATH`.
 
 ```bash
 git clone --recursive https://github.com/SoHam-56/SystolicMesh.git && cd SystolicMesh
