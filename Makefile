@@ -4,6 +4,8 @@ TB_DIR = $(PRJ_DIR)/testbenches
 
 # FMT ?= fp32 (fp32, bf16 or int8; anything else stops make) picks the build's define, FMT_DEF = +define+FMT_<FMT>.
 include $(PRJ_DIR)/ArithmeticLibrary/Common/fmt.mk
+# SIM ?= verilator, or vcs (ArithmeticLibrary's sim.mk: plain VCS builds; TRACE=1, XPROP=1, RANDINIT=1); make vcs runs TB_SystolicMesh on VCS.
+include $(PRJ_DIR)/ArithmeticLibrary/Common/sim.mk
 
 # Toolchain
 VERILATOR = verilator
@@ -110,17 +112,9 @@ endif
 # One-off defines, e.g. EXTRA_FLAGS=-DASSERT_SELFTEST
 VERILATOR_FLAGS += $(EXTRA_FLAGS)
 
-VCS_FLAGS = \
-	-full64 \
-	-sverilog \
-	-debug_all \
-	-timescale=1ns/1ps \
-	-Mdir=$(VCS_DIR) \
-	+v2k \
-	+incdir+$(SRC_DIR) \
-	+incdir+$(TB_DIR) \
-	+define+VCS$(if $(filter 1,$(TRACE)), +define+ENABLE_TRACE) \
-	$(FMT_DEF)
+# VCS: the same define, sizes (-pvalue+ for Verilator's -G) and EXTRA_FLAGS' -G and -D; sim.mk keeps it plain (TRACE=1 adds the waveform).
+VCS_FLAGS = +incdir+$(SRC_DIR) +incdir+$(TB_DIR) $(FMT_DEF) \
+	$(call vcs_g,$(TOP_MODULE),$(filter -G%,$(VERILATOR_FLAGS))) $(patsubst -D%,+define+%,$(filter -D%,$(EXTRA_FLAGS)))
 
 default: verilator
 
@@ -146,13 +140,12 @@ verilator:
 
 vcs:
 	@echo "=== VCS simulation for Systolic Array ==="
-	@mkdir -p $(VCS_DIR)
-	$(VCS) $(VCS_FLAGS) \
-		-o $(VCS_DIR)/$(TOP_MODULE)_sim \
-		$(addprefix $(SRC_DIR)/,$(DESIGN_FILES)) \
-		$(TB_DIR)/$(TESTBENCH)
+	$(call vcs_build,$(TOP_MODULE),$(VCS_DIR),$(addprefix $(SRC_DIR)/,$(DESIGN_FILES)) $(TB_DIR)/$(TESTBENCH),$(VCS_FLAGS))
+	@echo "-- Copying test files"
+	@rm -f $(VCS_DIR)/packShift*.mem $(VCS_DIR)/matrixBias*.mem $(VCS_DIR)/acc*.mem  # as make verilator: no earlier test's shift, bias or passes
+	@if ls $(TB_DIR)/stimulus/*.mem 1> /dev/null 2>&1; then cp $(TB_DIR)/stimulus/*.mem $(VCS_DIR); fi
 	@echo "-- Running VCS simulation"
-	cd $(VCS_DIR) && ./$(TOP_MODULE)_sim
+	cd $(VCS_DIR) && ./sim $(VCS_RUN) $(SIM_ARGS)
 	@echo "-- VCS simulation complete"
 
 wave:
@@ -211,6 +204,7 @@ mesh-regression:
 		--matrix-size $(MATRIX_SIZE) \
 		--group $(REGRESSION_GROUP) \
 		$(_FAST_FLAG) \
+		$(if $(filter vcs,$(SIM)),--sim vcs) \
 		$(REGRESSION_OPTS)
 
 # Checks against their own references (hand corners, an integer RNE, float64), which a rounding bug shared by an RTL unit and its model fails.
@@ -242,7 +236,7 @@ space := $(empty) $(empty)
 REG_FORMATS = $(subst $(space),$(comma),$(strip $(or $(REG_FMT),$(FORMATS))))
 REG_SELECT  = --formats $(REG_FORMATS)$(if $(filter 1,$(REG_SMALL)), --small)
 REG_DIR    ?= $(TB_DIR)/results/regression
-REG_SUMMARY = $(PYTHON) $(REGRESSION_SCRIPT) --action summary --results $(REG_DIR) $(REG_SELECT)
+REG_SUMMARY = $(PYTHON) $(REGRESSION_SCRIPT) --action summary --results $(REG_DIR) $(REG_SELECT) --sim $(SIM)
 ifneq ($(filter regression,$(MAKECMDGOALS)),)
 ifeq ($(origin REG_RUN),undefined)
 REG_RUN := $(shell date +%Y%m%d-%H%M%S)-$(shell echo $$PPID)
@@ -252,7 +246,7 @@ endif
 
 # One point, e.g. make regression/bf16/N8_T2/mesh: runs in a private copy of the tree, writes $(REG_DIR)/<point>.log and .json.
 regression/%:
-	@$(PYTHON) $(REGRESSION_SCRIPT) --action point --name $* --results $(REG_DIR)$(if $(REG_RUN), --run $(REG_RUN))$(if $(filter regression,$(MAKECMDGOALS)), --keep-going)
+	@$(PYTHON) $(REGRESSION_SCRIPT) --action point --name $* --results $(REG_DIR) --sim $(SIM)$(if $(REG_RUN), --run $(REG_RUN))$(if $(filter regression,$(MAKECMDGOALS)), --keep-going)
 
 regression: $(addprefix regression/,$(REG_POINTS))
 	@$(REG_SUMMARY) --run $(REG_RUN)

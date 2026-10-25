@@ -12,6 +12,33 @@ ROOT = reg.ROOT
 CHECKS = ["model-tests", "aril-fpu", "aril-narrow"]
 
 
+def test_vcs_commands():
+    """SIM=vcs: each mesh point asks regression.py for VCS (make vcs), aril-narrow runs fp32ToBf16's bench on VCS, and make -n names vcs, never verilator."""
+    import copy
+    spec = copy.copy(reg.SPEC)
+    spec.sim = "vcs"
+    a = spec.argv("bf16/N8_T2/mesh-held", None)
+    assert a[-1] == "SIM=vcs" and a[:3] == ["make", "mesh-regression", "MATRIX_SIZE=8"] and reg.SPEC.argv("bf16/N8_T2/mesh-held", None) == a[:-1], a
+    assert spec.argv("aril-narrow", None) == ["make", "-C", "ArithmeticLibrary/Converters/FP32ToBF16", "check", "SIM=vcs"]
+    env = {k: x for k, x in os.environ.items() if not k.startswith("MAKE") and k != "SIM"}
+    run = lambda *x: subprocess.run(["make", "-s", "-n", *x], cwd=ROOT, capture_output=True, text=True, env=env)
+    r = run(*a[1:])
+    assert r.returncode == 0 and "--sim vcs" in r.stdout, r.stdout[-300:]
+    r = run("vcs", "FMT=int8", "MATRIX_SIZE=8", "TILE_SIZE=2", "COLLAPSE_K=0", "HELD_ACCUM=1", "EXTRA_FLAGS=-DASSERT_SELFTEST")
+    for want in ("-top TB_SystolicMesh", "+define+FMT_INT8", "-pvalue+TB_SystolicMesh.MATRIX_SIZE=8", "-pvalue+TB_SystolicMesh.TILE_SIZE=2",
+                 "-pvalue+TB_SystolicMesh.COLLAPSE_K=0", "-pvalue+TB_SystolicMesh.HELD_ACCUM=1", "+define+ASSERT_SELFTEST", "./sim  +vcs+dumpvarsoff"):
+        assert want in r.stdout, (want, r.stdout[-500:])
+    assert "verilator" not in r.stdout.lower().replace("make verilator", "") and "-debug" not in r.stdout, r.stdout[-300:]
+    r = run(*spec.argv("aril-narrow", None)[1:])
+    assert r.returncode == 0 and "vcs -full64" in r.stdout and "verilator " not in r.stdout, r.stdout[-300:]
+    r = run("regression", "SIM=vcs", "SMALL=1", f"PYTHON={sys.executable}")
+    pts = [x for x in r.stdout.splitlines() if "--action point " in x]
+    assert pts and all(" --sim vcs" in x for x in pts) and " --sim vcs" in r.stdout.splitlines()[-1], r.stdout[-300:]
+    v = "RESULT: PASSED\nfp32ToBf16: 52 corners against their table, 7 values, 0 errors\n"
+    assert spec.verdict("aril-narrow", v, 0) == "PASS" and reg.SPEC.verdict("aril-narrow", v, 0).startswith("FAIL (no 'lint fp32ToBf16")
+    assert spec.verdict("aril-narrow", v + "FAIL: X in output word 3 of test narrow bf16\n", 0).startswith("FAIL (X in output word 3")
+
+
 def test_points():
     small, full = reg.SPEC.points(True, list(reg.FORMATS)), reg.SPEC.points(False, list(reg.FORMATS))
     assert small[:3] == full[:3] == CHECKS, small[:4]  # format-independent: once
@@ -28,6 +55,7 @@ def test_points():
     assert [reg.SPEC.parse(p)["ck"] for p in ("fp32/N8_T2/mesh", "fp32/N8_T2/mesh-ck0")] == [1, 0]
     assert reg.SPEC.points(True, ["int8"]) == CHECKS + [p for p in small + held(reg.SPEC.points(True, ["int8"])) if p.startswith("int8/")]
     assert reg.SPEC.points(False, []) == []
+    assert not any(reg.SPEC.not_applicable(p) for p in full)  # every point runs under VCS too
     for bad in ("fp32/N8_T8/mesh-held", "fp32/N32_T2/mesh-held", "fp32/N8_T16/mesh", "fp16/N8_T2/mesh", "fp32/N12_T4/mesh", "fp32/model-tests", "fp32/N8_T2/pipeline", "fp32/N8_T2/mesh-ck2", "nosuch"):
         try:
             reg.SPEC.parse(bad)

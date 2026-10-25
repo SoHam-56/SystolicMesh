@@ -1,4 +1,5 @@
 Verilator/
+VCS/
 VIVADO*/
 testbenches/debug/
 testbenches/results/
