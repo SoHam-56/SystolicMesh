@@ -129,6 +129,65 @@ make                                                # build and simulate with Ve
 
 `regression.py` drives the regression, `matmul_tests.py` and `conv_tests.py` generate stimulus, and `mesh_model.py` is the reference.
 
+## Standalone machine
+
+Everything here runs on any Linux machine; nothing depends on the authors' servers.
+
+**You need:** GNU make, git, a C++ compiler with C++20 coroutines (g++ 10 or later), Verilator built with that compiler (tested: 5.035 for every regression, and the released 5.052), and Python 3 with the packages in `requirements.txt` (tested with Python 3.11).
+
+```bash
+git clone --recursive https://github.com/SoHam-56/SystolicMesh.git && cd SystolicMesh
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+make -j4 regression SMALL=1 PYTHON=$PWD/.venv/bin/python
+```
+
+**Choosing N in `make -jN`:** use the per-point peaks above (collapse-k 1 about 0.4 GB at N = 8 and 1 GB at 16; collapse-k 0 about 0.8 GB at 8 and 6 GB at 16), so `SMALL=1` at `-j4` fits in 32 GB and one point at a time in 16 GB. Nothing is skipped.
+
+---
+
+## Running with VCS
+
+`make regression` runs on Verilator by default. `SIM=vcs` runs the same points, through the same gates, on Synopsys VCS, a 4-state simulator: it also models unknown (X) and floating (Z) bit values, which Verilator, a 2-state simulator, turns into 0 or 1.
+
+**The authors have not run the VCS path yet** (no VCS license where it was written). The commands, gates and parsers are in place and were checked without VCS; your run is the first real one.
+
+**You need:** `vcs` on your `PATH` with a working license, the C++ compiler VCS uses, GNU make, and Python 3 with `pip install -r requirements.txt`.
+
+**Run it:**
+
+```bash
+make -j4 regression SIM=vcs SMALL=1
+```
+
+**Read the table** (also written to `testbenches/results/regression/regression.log`). Each row is one check: its name, its verdict, its time and its log. The last line is the overall verdict, for example `SYSTOLICMESH REGRESSION PASS: 57 of 57 gated points passed`.
+
+| Verdict | Meaning |
+|---|---|
+| `PASS` | the check met the same gate as on Verilator: every output against its reference and the true function |
+| `FAIL (...)` | it did not; the bracket says why, the log (path on the row) says where |
+| `N/A (...)` | not used here: every point runs on VCS |
+
+**If a row fails,** send back `testbenches/results/regression/regression.log` and the log of each failing row. A line such as `FAIL: X in output word 37 of test <name>` means the design produced an unknown value where a number was expected: a real finding for the authors, not a set-up problem. A license or compile failure shows as `FAIL (exit N)` with VCS's message in the log.
+
+**Options:** `TRACE=1` waveforms, `XPROP=1` X-propagation, `RANDINIT=1 SEED=<n>` random register power-up instead of X. Without them a VCS build is plain: no debug access and no waveform.
+
+What maps to what:
+
+| Verilator | VCS | Note |
+|---|---|---|
+| `--binary --timing --assert` | `vcs -full64 -sverilog -timescale=1ns/1ps` | VCS runs delays and assertions natively |
+| `--top-module X` | `-top X` |  |
+| `-I<dir>`, `+define+X`, `-DX` (also in `EXTRA_FLAGS`) | `+incdir+<dir>`, `+define+X` |  |
+| `-G<name>=<value>` (sizes, `EXTRA_FLAGS`) | `-pvalue+<top>.<name>=<value>` | top-level parameters, as with `-G` |
+| `--trace` (`TRACE=1`) | `-debug_access+all +define+ENABLE_TRACE` (`TRACE=1`) | without it, `+vcs+dumpvarsoff`: no waveform |
+| `--x-initial unique`, `+verilator+rand+reset+2` | `+vcs+initreg+random` (compile), `+vcs+initreg+<SEED>` (run): `RANDINIT=1 SEED=<n>` | VCS's default is X power-up, stricter than Verilator's zeros |
+| (none) | `-xprop=tmerge`: `XPROP=1` | X-propagation through `if` and `case` |
+| `+verilator+error+limit+N` | nothing | VCS carries on after `$error` by default |
+| `-j`, `--build-jobs`, `--threads`, `SIM_THREADS` | `-j<cores>` (compile) | VCS simulates on one thread |
+| `OPT_FAST=-O0`, `LARGE_CODE=1`, `USE_CCACHE` | not applicable | Verilator build workarounds |
+| `/* verilator lint_off ... */`, `lint_waivers.vlt` | ignored | comments to VCS; the waiver file is Verilator's |
+| `aril-narrow`: fp32ToBf16's bench and its Verilator lint | the bench on VCS | its VCS lint is ArithmeticLibrary's own lint point |
+
 ---
 
 ## Author
