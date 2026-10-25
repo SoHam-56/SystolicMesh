@@ -179,7 +179,32 @@ def test_assert_stop_is_not_a_build_failure():
     assert reg._parse(raw)["status"] == "ASSERT" and "BUILDFAIL" not in raw
 
 
-MIN_TESTS = 12  # tests this file holds; fewer run means one was lost, which is a failure
+def test_x_counts_and_words_fail_by_name():
+    """A 4-state simulator's x in a count, a cycle count or a dumped sum fails the test by name; a VCS assertion is ASSERT, as Verilator's."""
+    r = reg._parse(CLEAN.replace("Total Elements: 5888", "Total Elements: x"), "mm_relu N8 T2")
+    assert r["status"] == "FAIL" and r["xline"] == "FAIL: X in element count of test mm_relu N8 T2 ('x')", r
+    r = reg._parse(CLEAN.replace("Set 1 : 61 cycles", "Set 1 : X cycles"), "mm_relu N8 T2")
+    assert r["status"] == "FAIL" and r["xline"].startswith("FAIL: X in cycle count 1 of test mm_relu N8 T2"), r
+    assert reg._parse(CLEAN)["status"] == "PASS" and "xline" not in reg._parse(CLEAN)
+    vcs = 'Error: "/t/SystolicMesh.sv", 545: TB_SystolicMesh.dut.a_pack_one_pass: at time 2975 ns\n'
+    assert reg._parse(CLEAN + vcs)["status"] == "ASSERT"
+    from matmul_tests import gen_mm_bias_special
+    stim, N = _gen("fp32", (gen_mm_bias_special,)), 8
+    rows = _model_rows(stim, "fp32")
+    name, pre, post = rows[0]
+    path = _dump(stim, N, rows)
+    t = open(path).read().splitlines()
+    k = next(i for i, x in enumerate(t) if x.startswith("R ")) + 1 + 37
+    t[k] = t[k].split()[0] + " xxxxxxxx"
+    open(path, "w").write("\n".join(t) + "\n")
+    try:
+        reg.truth_gate(path, stim, N, "fp32")
+        raise AssertionError("an x word passed the truth dump's parser")
+    except reg.fourstate.Unknown as e:
+        assert str(e).startswith(f"X in output word 37 of test {name}"), e
+
+
+MIN_TESTS = 13  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]

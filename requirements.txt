@@ -1,0 +1,2 @@
+# Python packages make regression needs (tested with Python 3.11): pip install -r requirements.txt
+numpy==1.26.4

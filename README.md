@@ -112,6 +112,8 @@ make mesh-regression MATRIX_SIZE=32 REGRESSION_OPTS="--format int8 --tiles 4"
 make mesh-regression MATRIX_SIZE=16 REGRESSION_OPTS="--format bf16 --collapse-k 0"
 ```
 
+Activate the venv in the shell that runs make: some checks call `python3` directly, and without the venv that is the system's Python, which may lack NumPy.
+
 How `make regression` works:
 - It is a list of *points*: the model checks (`model-tests`, `aril-fpu`, `aril-narrow`), and two per format, N and tile size: `bf16/N8_T2/mesh` (full-depth arrays, collapse-k 1) and `bf16/N8_T2/mesh-ck0` (depth slices and the reduce tree, collapse-k 0). `python3 regression.py --action points` lists them.
 - Each point is its own make target, so `make -j4 regression SMALL=1` runs four at a time, each simulating on a quarter of the cores; `make regression/bf16/N8_T2/mesh` runs one alone. `SMALL=1` and `FMT=int8` on make's command line narrow it.
@@ -128,6 +130,65 @@ make                                                # build and simulate with Ve
 ```
 
 `regression.py` drives the regression, `matmul_tests.py` and `conv_tests.py` generate stimulus, and `mesh_model.py` is the reference.
+
+## Standalone machine
+
+Everything here runs on any Linux machine; nothing depends on the authors' servers.
+
+**You need:** GNU make, git, a C++ compiler with C++20 coroutines (g++ 10 or later), Verilator 5.035 built with that compiler (the version every regression runs on), and Python 3 with the packages in `requirements.txt` (tested with Python 3.11). The released Verilator 5.052 is not supported yet: it runs SystolicMesh's regression and SIENNA's fp32 and int8 points, but stops on bf16 builds (gpnae_tail.sv), on GPNAE's lane bench (a zero-delay warning in TB_gpnae) and on the lint gates (its new warnings, and its removal of --xml-only, which check-hier reads). A Verilator configured with a g++ older than 10 omits the `-fcoroutines` its `--timing` builds need: put a `g++` wrapper that adds it first on `PATH`.
+
+```bash
+git clone --recursive https://github.com/SoHam-56/SystolicMesh.git && cd SystolicMesh
+python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt   # every make below runs in this shell
+make -j4 regression SMALL=1
+```
+
+**Choosing N in `make -jN`:** use the per-point peaks above (collapse-k 1 about 0.4 GB at N = 8 and 1 GB at 16; collapse-k 0 about 0.8 GB at 8 and 6 GB at 16), so `SMALL=1` at `-j4` fits in 32 GB and one point at a time in 16 GB. Nothing is skipped.
+
+---
+
+## Running with VCS
+
+`make regression` runs on Verilator by default. `SIM=vcs` runs the same points, through the same gates, on Synopsys VCS, a 4-state simulator: it also models unknown (X) and floating (Z) bit values, which Verilator, a 2-state simulator, turns into 0 or 1.
+
+**The authors have not run the VCS path yet** (no VCS license where it was written). The commands, gates and parsers are in place and were checked without VCS; your run is the first real one.
+
+**You need:** `vcs` on your `PATH` with a working license, the C++ compiler VCS uses, GNU make, and Python 3 with `pip install -r requirements.txt`.
+
+**Run it:**
+
+```bash
+make -j4 regression SIM=vcs SMALL=1
+```
+
+**Read the table** (also written to `testbenches/results/regression/regression.log`). Each row is one check: its name, its verdict, its time and its log. The last line is the overall verdict, for example `SYSTOLICMESH REGRESSION PASS: 57 of 57 gated points passed`.
+
+| Verdict | Meaning |
+|---|---|
+| `PASS` | the check met the same gate as on Verilator: every output against its reference and the true function |
+| `FAIL (...)` | it did not; the bracket says why, the log (path on the row) says where |
+| `N/A (...)` | not used here: every point runs on VCS |
+
+**If a row fails,** send back `testbenches/results/regression/regression.log` and the log of each failing row. A line such as `FAIL: X in output word 37 of test <name>` means the design produced an unknown value where a number was expected: a real finding for the authors, not a set-up problem. A license or compile failure shows as `FAIL (exit N)` with VCS's message in the log.
+
+**Options:** `TRACE=1` waveforms, `XPROP=1` X-propagation, `RANDINIT=1 SEED=<n>` random register power-up instead of X. Without them a VCS build is plain: no debug access and no waveform.
+
+What maps to what:
+
+| Verilator | VCS | Note |
+|---|---|---|
+| `--binary --timing --assert` | `vcs -full64 -sverilog -timescale=1ns/1ps` | VCS runs delays and assertions natively |
+| `--top-module X` | `-top X` |  |
+| `-I<dir>`, `+define+X`, `-DX` (also in `EXTRA_FLAGS`) | `+incdir+<dir>`, `+define+X` |  |
+| `-G<name>=<value>` (sizes, `EXTRA_FLAGS`) | `-pvalue+<top>.<name>=<value>` | top-level parameters, as with `-G` |
+| `--trace` (`TRACE=1`) | `-debug_access+all +define+ENABLE_TRACE` (`TRACE=1`) | without it, `+vcs+dumpvarsoff`: no waveform |
+| `--x-initial unique`, `+verilator+rand+reset+2` | `+vcs+initreg+random` (compile), `+vcs+initreg+<SEED>` (run): `RANDINIT=1 SEED=<n>` | VCS's default is X power-up, stricter than Verilator's zeros |
+| (none) | `-xprop=tmerge`: `XPROP=1` | X-propagation through `if` and `case` |
+| `+verilator+error+limit+N` | nothing | VCS carries on after `$error` by default |
+| `-j`, `--build-jobs`, `--threads`, `SIM_THREADS` | `-j<cores>` (compile) | VCS simulates on one thread |
+| `OPT_FAST=-O0`, `LARGE_CODE=1`, `USE_CCACHE` | not applicable | Verilator build workarounds |
+| `/* verilator lint_off ... */`, `lint_waivers.vlt` | ignored | comments to VCS; the waiver file is Verilator's |
+| `aril-narrow`: fp32ToBf16's bench and its Verilator lint | the bench on VCS | its VCS lint is ArithmeticLibrary's own lint point |
 
 ---
 

@@ -1,4 +1,5 @@
 Verilator/
+VCS/
 testbenches/debug/
 testbenches/results/
 testbenches/stimulus/

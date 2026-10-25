@@ -47,6 +47,7 @@ import stim_format
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ArithmeticLibrary", "Common", "models"))
 import truth  # noqa: E402  AriL's true-function gate: the mesh's sums against the float64 sum of its operands
+import fourstate  # noqa: E402  4-state safe parsing: an x or z word or count fails its test by name
 
 FORMATS = ("fp32", "bf16", "int8")  # make's FMT: the build's define
 FMT, COLLAPSE, HELD = "fp32", 1, 0  # set from --format, --collapse-k and --held-accum
@@ -57,7 +58,8 @@ FMT, COLLAPSE, HELD = "fp32", 1, 0  # set from --format, --collapse-k and --held
 ROOT = os.path.dirname(os.path.abspath(__file__))
 MATRIX_N = 0  # this run's N, set in main
 STIM_DIR = os.path.join(ROOT, "testbenches", "stimulus")
-TRUTH_DUMP = os.path.join(ROOT, "Verilator", "truth_dump.txt")  # TB_SystolicMesh's sums and words of every result it checked
+TRUTH_DUMP = os.path.join(ROOT, "Verilator", "truth_dump.txt")  # TB_SystolicMesh's sums and words of every result it checked (VCS/ under --sim vcs)
+SIM = "verilator"  # --sim: make verilator or make vcs
 RESULTS_DIR = os.path.join(ROOT, "testbenches", "results", "readiness")
 
 # ---------------------------------------------------------------------------
@@ -83,7 +85,8 @@ hdr = lambda s: f"{_O}{_B}{s}{_X}"
 def _make(tile: int, num_sets: int) -> tuple:
     """Runs `make` in the project root for one configuration; returns (stdout and stderr, wall seconds). Verilator rebuilds only on a new configuration."""
     t0 = time.time()
-    r = subprocess.run(["make", *build_args(FMT, MATRIX_N, tile, num_sets, COLLAPSE, HELD)], cwd=ROOT, capture_output=True, text=True)
+    target = ["vcs"] if SIM == "vcs" else []  # make's default goal is verilator
+    r = subprocess.run(["make", *target, *build_args(FMT, MATRIX_N, tile, num_sets, COLLAPSE, HELD)], cwd=ROOT, capture_output=True, text=True)
     out = r.stdout + r.stderr
     if r.returncode != 0:
         out += f"\n{'SIMFAIL' if SIM_STARTED in out else 'BUILDFAIL'}: make exited {r.returncode}\n"  # a started simulation that stopped is not a build failure
@@ -128,8 +131,8 @@ def _run_checks() -> list:
 # ---------------------------------------------------------------------------
 
 
-def _parse(raw: str) -> dict:
-    if "Assertion failed" in raw:  # a firing assertion leaves the exit code and the TB's counts untouched
+def _parse(raw: str, test: str = "-") -> dict:
+    if "Assertion failed" in raw or re.search(r'^(?:Error|Fatal): "|: started at .* failed at', raw, re.M):  # a firing assertion (Verilator's or VCS's words) leaves the exit code and counts untouched
         return dict(status="ASSERT", passed=0, failed=0, elements=0, tol=0, fail_els=0, avg_cyc=0)
     if "BUILDFAIL" in raw or "version `GLIBC" in raw or "%Error" in raw:
         return dict(status="NO-RUN", passed=0, failed=0, elements=0, tol=0,
@@ -145,17 +148,18 @@ def _parse(raw: str) -> dict:
             avg_cyc=0,
         )
 
-    def _i(pat):
-        m = re.search(pat, raw)
-        return int(m.group(1)) if m else 0
-
-    passed = _i(r"Passed Sets:\s*(\d+)")
-    failed = _i(r"Failed Sets:\s*(\d+)")
-    elements = _i(r"Total Elements:\s*(\d+)")
-    tol = _i(r"Tol Passed Els:\s*(\d+)")
+    D = fourstate.DEC
+    try:  # a 4-state simulator's x in a count fails the test by name
+        _i = lambda pat, what: fourstate.field(pat, raw, test, what) or 0
+        passed = _i(rf"Passed Sets:\s*({D})", "passed set count")
+        failed = _i(rf"Failed Sets:\s*({D})", "failed set count")
+        elements = _i(rf"Total Elements:\s*({D})", "element count")
+        tol = _i(rf"Tol Passed Els:\s*({D})", "element count")
+        cycles = [c[0] for c in fourstate.fields(rf"Set\s+\d+\s*:\s*({D})\s*cycles", raw, test, "cycle count")]
+    except fourstate.Unknown as e:
+        return dict(status="FAIL", passed=0, failed=0, elements=0, tol=0, fail_els=1, avg_cyc=0, xline=fourstate.fail_line(e))
     fail_els = raw.count("[FAIL]")
-    cycles = re.findall(r"Set\s+\d+\s*:\s*(\d+)\s*cycles", raw)
-    avg_cyc = sum(int(c) for c in cycles) // len(cycles) if cycles else 0
+    avg_cyc = sum(cycles) // len(cycles) if cycles else 0
     # No sets and no elements means the testbench never checked anything. Reporting that
     # as FAIL hides the real cause, which is usually a stale or unrunnable simulator binary.
     if passed + failed == 0 or elements == 0:
@@ -229,8 +233,8 @@ def truth_gate(dump: str, stim: str, N: int, fmt: str) -> dict:
         rows = [ln.split() for ln in tok[i + 1:i + 1 + N * N]]
         if len(rows) != N * N or any(len(r) != 2 for r in rows):
             raise RuntimeError(f"truth dump: result '{tok[i]}' holds {len(rows)} of {N * N} element lines")
-        pre = np.array([int(r[0], 16) for r in rows], dtype=np.int64).reshape(N, N)
-        post = np.array([int(r[1], 16) for r in rows], dtype=np.int64)
+        pre = fourstate.column(rows, 0, f"{name}", what="output sum").reshape(N, N)  # fourstate.Unknown (a ValueError) on an x or z
+        post = fourstate.column(rows, 1, f"{name}")
         if name not in cache:
             cache[name] = _operands(stim, name, N)
         passes, bias = cache[name]
@@ -303,7 +307,10 @@ def _run_group(tests: list, tile: int, N: int, num_sets: int, group_label: str) 
         # make: the configuration's first test builds it, the rest reuse the build
         raw, wall = _make(tile, num_sets)
 
-        parsed = _parse(raw)
+        parsed = _parse(raw, f"{test['name']} N{N} T{tile}")
+        if parsed.get("xline"):
+            raw += "\n" + parsed["xline"] + "\n"
+            print(err(parsed["xline"]))
         if parsed["status"] == "PASS" and test.get("expect", "") not in raw:  # a stage the test needs never ran
             parsed["status"] = "FAIL"
             print(err(f"[FAIL] '{test['expect']}' is not in the log"), end="  ")
@@ -312,6 +319,8 @@ def _run_group(tests: list, tile: int, N: int, num_sets: int, group_label: str) 
             try:
                 tres = truth_gate(TRUTH_DUMP, STIM_DIR, N, FMT)
                 tl, tbad = truth_lines(tres)
+            except fourstate.Unknown as e:
+                tl, tbad = [], [f"[FAIL] truth: none ({fourstate.fail_line(e)} N{N} T{tile} {test['name']})"]
             except (RuntimeError, ValueError, OSError) as e:
                 tl, tbad = [], [f"[FAIL] truth: none ({e})"]
             if os.path.exists(TRUTH_DUMP):  # kept beside the log, so a run's sums can be judged again offline
@@ -432,7 +441,7 @@ def _report(results: list, N: int, fast: bool, group: str, checks: list) -> str:
              " bf16 narrowing exact; fp32 and int8 delivered words equal to the sums written")
     L.append("* Compare: bit-exact against mesh_model (matmul in the float formats, matmul_int in int8), a diagnostic that is still required")
     L.append(f"* Format: {FMT}  |  collapse-k {COLLAPSE}")
-    L.append("* Tool: Verilator  |  Clock: 10 ns")
+    L.append(f"* Tool: {'VCS' if SIM == 'vcs' else 'Verilator'}  |  Clock: 10 ns")
     L.append("=" * W)
 
     path = os.path.join(RESULTS_DIR, f"readiness_report_{FMT}_ck{COLLAPSE}.log")
@@ -478,11 +487,13 @@ def main() -> None:
     parser.add_argument("--collapse-k", type=int, choices=[0, 1], default=1,
                         help="1: full-depth arrays (the RTL default); 0: depth slices and the reduce tree")
     parser.add_argument("--held-accum", action="store_true", help="also TB_SystolicMesh's held accumulate stage (HELD_ACCUM = 1)")
+    parser.add_argument("--sim", choices=("verilator", "vcs"), default="verilator", help="the simulator every test builds and runs on")
     parser.add_argument("--no-checks", action="store_true",
                         help="skip the model checks (make aril-fpu, aril-narrow, model-tests); SIENNA's gate runs them as steps")
     args = parser.parse_args()
-    global FMT, COLLAPSE, MATRIX_N, HELD
-    FMT, COLLAPSE, MATRIX_N, HELD = args.format, args.collapse_k, args.matrix_size, int(args.held_accum)
+    global FMT, COLLAPSE, MATRIX_N, HELD, SIM, TRUTH_DUMP
+    FMT, COLLAPSE, MATRIX_N, HELD, SIM = args.format, args.collapse_k, args.matrix_size, int(args.held_accum), args.sim
+    TRUTH_DUMP = os.path.join(ROOT, "VCS" if SIM == "vcs" else "Verilator", "truth_dump.txt")
     stim_format.configure(FMT, 2, COLLAPSE)
 
     N = args.matrix_size
@@ -651,12 +662,14 @@ class MeshSpec(regress.Spec):
         return {"n": int(m.group(2)), "tile": int(m.group(3)), "fmt": m.group(1), "kind": "mesh", "ck": 0 if m.group(4) else 1, "held": int(held)}
 
     def argv(self, name, opts):
-        p = self.parse(name)
+        p, vcs = self.parse(name), ["SIM=vcs"] if self.sim == "vcs" else []
+        if p["kind"] == "aril-narrow" and self.sim == "vcs":  # fp32ToBf16's bench on VCS; its VCS lint is ArithmeticLibrary's own lint point
+            return ["make", "-C", "ArithmeticLibrary/Converters/FP32ToBF16", "check", "SIM=vcs"]
         if p["kind"] != "mesh":
             return ["make", p["kind"]] + ([f"PYTHON={sys.executable}"] if p["kind"] == "model-tests" else [])
         held = " --held-accum --group matmul" if p["held"] else ""  # the held stage runs in mm_accum, a matmul test
         return ["make", "mesh-regression", f"MATRIX_SIZE={p['n']}",
-                f"REGRESSION_OPTS=--format {p['fmt']} --collapse-k {p['ck']} --tiles {p['tile']} --no-checks{held}", f"PYTHON={sys.executable}"]
+                f"REGRESSION_OPTS=--format {p['fmt']} --collapse-k {p['ck']} --tiles {p['tile']} --no-checks{held}", f"PYTHON={sys.executable}", *vcs]
 
     def verdict(self, name, text, rc):
         v = regress.common_verdict(text, rc)
@@ -668,9 +681,9 @@ class MeshSpec(regress.Spec):
             return "PASS" if n == MODEL_TEST_FILES else f"FAIL ({n} of {MODEL_TEST_FILES} model test files passed)"
         if name == "aril-fpu":
             return regress.marker_verdict(text, rc, (r"^RESULT: PASSED",), (r"RESULT: FAILED",))
-        if name == "aril-narrow":
-            return regress.marker_verdict(text, rc, (r"^RESULT: PASSED", r"^fp32ToBf16: \d+ corners .* 0 errors", r"^lint fp32ToBf16: 0 warnings, 0 errors$"),
-                                          (r"RESULT: FAILED",))
+        if name == "aril-narrow":  # under VCS the bench without Verilator's lint line
+            lint = () if self.sim == "vcs" else (r"^lint fp32ToBf16: 0 warnings, 0 errors$",)
+            return regress.marker_verdict(text, rc, (r"^RESULT: PASSED", r"^fp32ToBf16: \d+ corners .* 0 errors") + lint, (r"RESULT: FAILED",))
         s, m = re.findall(r"^\s*Simulations\s*:\s*(\d+)\s*$", text, re.M), re.findall(r"^\s*Passed\s*:\s*(\d+)\s*$", text, re.M)
         g = re.findall(r"^\s*TRUTH: (\d+) simulations gated, (\d+) with misses$", text, re.M)
         miss = sorted(set(re.findall(r"^\s*\[FAIL\] truth: (\w+)", text, re.M)))

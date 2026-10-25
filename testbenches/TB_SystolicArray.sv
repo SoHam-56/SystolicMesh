@@ -155,7 +155,7 @@ module TB_SystolicArray #(
         for (int u = 0; u < U; u++) got += acc(rd_data[u]);
         err = (got > gold) ? got - gold : gold - got;
         checked++;
-        if (!rd_valid || (IS_INT ? err != 0.0 : err > 1.0e-5 * mag + 1.0e-12)) begin
+        if (rd_valid !== 1'b1 || $isunknown(rd_data) || (IS_INT ? err != 0.0 : err > 1.0e-5 * mag + 1.0e-12)) begin
           failed++;
           if (failed < 10) $display("  [FAIL] set %0d pixel %0d: got %f expected %f, err %e", s, p, got, gold, err);
         end
