@@ -52,7 +52,8 @@ DESIGN_FILES = \
   ../ArithmeticLibrary/Adders/Int32/src/int32Adder.sv
 
 TOP_MODULE = TB_SystolicMesh
-TESTBENCH = $(TOP_MODULE).sv
+# TB_SystolicMesh is the top bench (testbenches/top); TB_PE, TB_PE_pack and TB_SystolicArray are unit benches (testbenches/units)
+TESTBENCH = $(if $(filter TB_SystolicMesh,$(TOP_MODULE)),top,units)/$(TOP_MODULE).sv
 
 VERILATOR_DIR = $(PRJ_DIR)/Verilator
 VCS_DIR = $(PRJ_DIR)/VCS
@@ -184,7 +185,7 @@ check-fmt:
 
 # check-hier: at fp32, bf16, int8 and no define, both mesh modes, Verilator's elaborated hierarchy holds only that precision's units (check_hier.py).
 check-hier:
-	@$(PYTHON) $(PRJ_DIR)/check_hier.py --verilator $(VERILATOR) --out $(PRJ_DIR)/Verilator_hier --files $(DESIGN_FILES)
+	@$(PYTHON) $(PRJ_DIR)/scripts/check_hier.py --verilator $(VERILATOR) --out $(PRJ_DIR)/Verilator_hier --files $(DESIGN_FILES)
 
 clean:
 	@echo "-- Cleaning simulation artifacts"
@@ -214,7 +215,7 @@ aril-narrow:
 	$(MAKE) -C $(PRJ_DIR)/ArithmeticLibrary/Converters/FP32ToBF16 check lint
 
 model-tests:
-	cd $(PRJ_DIR) && $(PYTHON) test_mesh_model_packed.py && $(PYTHON) test_stim_format.py && $(PYTHON) test_regression_parse.py && $(PYTHON) test_regression_sweep.py
+	cd $(PRJ_DIR) && $(PYTHON) scripts/test_mesh_model_packed.py && $(PYTHON) scripts/test_stim_format.py && $(PYTHON) scripts/test_regression_parse.py && $(PYTHON) scripts/test_regression_sweep.py
 
 # make regression: the model checks once, the mesh at N 8-64 (SMALL=1: 8, 16) x every tile size x format; one target per point, then one table.
 FORMATS = fp32 bf16 int8
