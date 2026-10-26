@@ -85,7 +85,7 @@ Multiply-accumulates per cycle do not depend on the clock, so they compare desig
 - 11 matrix-multiply tests and the convolution tests (im2col), 19 to 23 sets each;
 - every tile size;
 - 8 × 8 to 64 × 64 in fp32, bf16 and int8 at every tile size, with full-depth arrays (collapse-k 1), and collapse-k 0 from 8 × 8 to 32 × 32 at every tile size (final sweep, 2026-10-25, ea85621);
-- collapse-k 0 at 64 × 64 at tile sizes 8 to 64, except int8 at tile size 16, whose run did not complete (a full disk quota truncated its result file). Tile sizes 2 and 4 were not run, by a cost ruling: they were sized for 512 and 768 GB machines, which were ruled out for cost (memory below).
+- collapse-k 0 at 64 × 64 at tile sizes 8 to 64 in every format (int8 at tile size 16 on a rerun, after a full disk quota truncated its first result file). Tile sizes 2 and 4 were not run, by a cost ruling: they were sized for 512 and 768 GB machines, which were ruled out for cost (memory below).
 
 Before the simulations, the regression checks the models against references of their own, so a rounding bug shared by the RTL and `mesh_model.py` still fails:
 - the fp32-to-bf16 rounding model against hand-derived corners and an integer round-to-nearest-even;
