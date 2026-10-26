@@ -34,7 +34,7 @@ What makes it fast:
 
 > All numbers are measured in cycle-accurate Verilator simulation. Times assume a **950 MHz** clock, the frequency the published TYTAN activation engine of the same project reached in a 45 nm process ([SIENNA](https://github.com/SoHam-56/SIENNA#publication)). Synthesis is planned.
 >
-> The figures were measured on 2026-10-05 (SystolicMesh e4a840a). The mesh's RTL has not changed since, but the 32 × 32 and 64 × 64 figures and the throughput inside SIENNA are measured again in the final sweep after the planned restructure.
+> The latency figures were measured on 2026-10-05 (SystolicMesh e4a840a); the mesh's RTL has not changed since. The throughput inside SIENNA was measured again in the final sweep of 2026-10-25, with the same result.
 
 **How latency is measured.** The testbench counts cycles from the start pulse to the result written to the result bank. For one set at N = 16, T = 4:
 
@@ -84,7 +84,8 @@ Multiply-accumulates per cycle do not depend on the clock, so they compare desig
 `make regression` runs every test at every size: 8 × 8, 16 × 16, 32 × 32 and 64 × 64, every tile size each allows, in fp32, bf16 and int8. It generates the stimulus, builds once per tile size, and compares every output with `scripts/mesh_model.py`, a bit-exact model of the mesh's arithmetic. Every output matches:
 - 11 matrix-multiply tests and the convolution tests (im2col), 19 to 23 sets each;
 - every tile size;
-- 8 × 8 to 32 × 32 in fp32, bf16 and int8 at every tile size; 64 × 64 in fp32 at every tile size, and in bf16 and int8 at tile size 16 (their other 64 × 64 tile sizes not yet run); collapse-k 0 at 8 × 8 and 16 × 16 at every tile size and at 32 × 32 tile size 8 in all three formats.
+- 8 × 8 to 64 × 64 in fp32, bf16 and int8 at every tile size, with full-depth arrays (collapse-k 1), and collapse-k 0 from 8 × 8 to 32 × 32 at every tile size (final sweep, 2026-10-25, ea85621);
+- collapse-k 0 at 64 × 64 at tile sizes 8 to 64, except int8 at tile size 16, whose run did not complete (a full disk quota truncated its result file). Tile sizes 2 and 4 were not run: they need a machine with more than 256 GB of memory.
 
 Before the simulations, the regression checks the models against references of their own, so a rounding bug shared by the RTL and `mesh_model.py` still fails:
 - the fp32-to-bf16 rounding model against hand-derived corners and an integer round-to-nearest-even;
@@ -118,8 +119,8 @@ How `make regression` works:
 - It is a list of *points*: the model checks (`model-tests`, `aril-fpu`, `aril-narrow`), and two per format, N and tile size: `bf16/N8_T2/mesh` (full-depth arrays, collapse-k 1) and `bf16/N8_T2/mesh-ck0` (depth slices and the reduce tree, collapse-k 0). `python3 regression.py --action points` lists them.
 - Each point is its own make target, so `make -j4 regression SMALL=1` runs four at a time, each simulating on a quarter of the cores; `make regression/bf16/N8_T2/mesh` runs one alone. `SMALL=1` and `FMT=int8` on make's command line narrow it.
 - Each point runs in a private copy of the working tree, git's files without ignored outputs (so stale stimulus or builds never reach it), under `TMPDIR` (point it at a large disk for N = 64), and writes its log to `testbenches/results/regression/`. The run ends with one table there, `regression.log`, and fails if any point fails or did not run; `make regression-summary` prints it again.
-- Memory: pick N in `make -jN` so the points fit, never a bare `-j`. Measured peak of a point's largest process: collapse-k 1 about 0.4 GB at N = 8, 1 GB at 16, 3 GB at 32 and 11 GB at 64; collapse-k 0 about 0.8 GB at N = 8, 6 GB at 16 and 12 GB at 32. Collapse-k 0 at N = 64 needs a large machine: about 108 GB (bf16, tile size 4) to 198 GB (fp32, tile size 4), and more than 430 GB at fp32 tile size 2. Its binary passes 2 GB, so it builds with the large code model (`LARGE_CODE=1`, which the regression sets).
-- Run times, measured on 8-core machines: `SMALL=1` takes about 1.9 hours one point at a time and 30 minutes with every point in parallel; a collapse-k 1 64 × 64 point takes up to an hour (fp32, tile size 16: 57 minutes), a collapse-k 0 32 × 32 point up to half an hour (fp32, tile size 8: 28 minutes).
+- Memory: pick N in `make -jN` so the points fit, never a bare `-j`. Measured peak of a point's largest process: collapse-k 1 about 0.4 GB at N = 8, 1 GB at 16, 3 GB at 32 and 11 GB at 64; collapse-k 0 about 0.8 GB at N = 8, 6 GB at 16 and 12 GB at 32 (but about 51 GB at 32, tile size 2). Collapse-k 0 at N = 64 needs a large machine: about 95 GB at tile size 8 and 46 GB at 16 (fp32, final sweep), about 108 GB (bf16) to 198 GB (fp32) at tile size 4, and more than 430 GB at fp32 tile size 2 (earlier runs). Its binary passes 2 GB, so it builds with the large code model (`LARGE_CODE=1`, which the regression sets).
+- Run times, measured on 8-core machines: `SMALL=1` takes about 1.9 hours one point at a time and 30 minutes with every point in parallel; at 64 × 64 a point takes up to 18.5 hours alone (fp32, tile size 64, collapse-k 1), and collapse-k 0 points 5 to 8.5 hours (final sweep).
 
 `mesh-regression`'s results go to `testbenches/results/readiness/`. To run one test by hand:
 
