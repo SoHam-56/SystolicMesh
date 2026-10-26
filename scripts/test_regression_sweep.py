@@ -78,7 +78,7 @@ def test_commands():
     assert [reg.make_args(n, ck) for n, ck in ((64, 0), (64, 1), (32, 0))] == [["LARGE_CODE=1"], [], []]  # a collapse-k 0 N = 64 binary passes 2 GB
     env = {k: x for k, x in os.environ.items() if not k.startswith("MAKE")}
     big = subprocess.run(["make", "-s", "-n", "verilator", "LARGE_CODE=1"], cwd=ROOT, capture_output=True, text=True, env=env).stdout
-    assert "-CFLAGS -mcmodel=large -CFLAGS -fno-pie -LDFLAGS -no-pie" in big, big[-300:]
+    assert "-CFLAGS -mcmodel=large -CFLAGS -fno-pie -LDFLAGS -no-pie -LDFLAGS -Wl,--no-relax" in big, big[-300:]  # ld cannot relax GOTPCREL past 2 GB
     assert "mcmodel" not in subprocess.run(["make", "-s", "-n", "verilator"], cwd=ROOT, capture_output=True, text=True, env=env).stdout
     pe = lambda n: reg.regress.point_env(reg.SPEC, n, "s", 8)
     assert "OPT_FAST" not in pe("fp32/N8_T2/mesh") and "OPT_FAST" not in pe("int8/N16_T4/mesh-ck0") and pe("bf16/N32_T8/mesh")["OPT_FAST"] == "-O0"  # -O0 only from N = 32: below it the long mesh simulations lose more than the build gains (rs1_spd_mesh)
