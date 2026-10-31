@@ -72,12 +72,13 @@ ifeq ($(USE_CCACHE),0)
 export CCACHE_DISABLE := 1
 endif
 
+# One verilation thread: 5.035 at -j 8 with --threads 8 hit V3TSP.cpp:353 "No unmarked edges" in about a third of int8 N8 T2 builds; at -j 1, none.
 VERILATOR_FLAGS = \
 	--timing \
 	--assert \
 	--top-module $(TOP_MODULE) \
 	--threads $(SIM_THREADS) \
-	-j $(shell nproc) \
+	-j 1 \
 	--build-jobs $(shell nproc) \
 	--output-split 20000 \
 	--output-split-cfuncs 20000 \

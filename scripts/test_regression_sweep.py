@@ -84,7 +84,7 @@ def test_commands():
     assert "OPT_FAST" not in pe("fp32/N8_T2/mesh") and "OPT_FAST" not in pe("int8/N16_T4/mesh-ck0") and pe("bf16/N32_T8/mesh")["OPT_FAST"] == "-O0"  # -O0 only from N = 32: below it the long mesh simulations lose more than the build gains (rs1_spd_mesh)
     make_n = lambda *a: subprocess.run(["make", "-s", "-n", *a], cwd=ROOT, capture_output=True, text=True, env=env).stdout
     cores = reg.regress._cores()
-    assert f"-j {cores} --build-jobs {cores} " in make_n("verilator"), "Verilator takes every core"
+    assert f"-j 1 --build-jobs {cores} " in make_n("verilator"), "one verilation thread (5.035's V3TSP error at -j 8), the g++ build every core"
     assert "--trace" not in make_n("verilator") and "--trace -DENABLE_TRACE" in make_n("verilator", "TRACE=1")  # no waveform by default
     assert "verilator TRACE=1" in make_n("wave"), "make wave builds with TRACE=1"
     tb = open(os.path.join(ROOT, "testbenches", "top", "TB_SystolicMesh.sv")).read()
