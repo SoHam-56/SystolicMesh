@@ -205,7 +205,21 @@ def test_x_counts_and_words_fail_by_name():
         assert str(e).startswith(f"X in output word 37 of test {name}"), e
 
 
-MIN_TESTS = 13  # tests this file holds; fewer run means one was lost, which is a failure
+def test_build_failure_names_its_error():
+    """A failed build's error lines reach the console with the log's path: Verilator's V3TSP internal error, a linker error, or the tail when no line matches."""
+    tsp = ("verilator --binary ...\nmake[1]: Leaving directory '/t/SystolicMesh'\n%Error: Internal Error: ../V3TSP.cpp:353: No unmarked edges found in tour\n"
+           "                        ... See the manual at https://verilator.org/verilator_doc.html for more assistance.\nmake[1]: *** [Makefile:125: verilator] Error 1\n\nBUILDFAIL: make exited 2\n")
+    e = reg.build_errors(tsp)
+    assert any("V3TSP.cpp:353" in x for x in e) and any("Error 1" in x for x in e) and not any("See the manual" in x for x in e), e
+    ld = "g++ ...\n" * 5000 + "x.o: relocation truncated to fit: R_X86_64_PC32 against `.bss'\ncollect2: error: ld returned 1 exit status\nBUILDFAIL: make exited 2\n"
+    assert any("relocation truncated" in x for x in reg.build_errors(ld)) and any("collect2: error" in x for x in reg.build_errors(ld))
+    assert reg.build_errors("a\nb\nc\nBUILDFAIL: make exited 2\n")[-1] == "BUILDFAIL: make exited 2"  # no error line: the tail
+    assert len(reg.build_errors("%Error: x\n" * 100)) <= reg.BUILD_ERROR_LINES
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "regression.py")).read()
+    assert "build_errors(raw)" in src and "build log:" in src, "the group runner prints the failed build's error lines and its log"
+
+
+MIN_TESTS = 14  # tests this file holds; fewer run means one was lost, which is a failure
 
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]

@@ -94,6 +94,17 @@ def _make(tile: int, num_sets: int) -> tuple:
     return out, time.time() - t0
 
 
+BUILD_ERROR_LINES = 12  # a failed build's error lines printed on the console; the whole output is in its test's log
+_BUILD_ERR = re.compile(r"%Error|\berror\b|\*\*\*|Killed|terminated|relocation truncated|No space left|Disk quota|BUILDFAIL", re.I)
+
+
+def build_errors(raw: str) -> list:
+    """A failed build's error lines (Verilator's %Error, g++ and ld errors, make's ***), or its last lines when none matches."""
+    lines = [x.rstrip() for x in raw.splitlines() if x.strip()]
+    hits = [x for x in lines if _BUILD_ERR.search(x)]
+    return (hits or lines)[-BUILD_ERROR_LINES:]
+
+
 SIM_STARTED = "SYSTOLIC MESH VERIFICATION"  # TB_SystolicMesh's banner: the build finished and the simulation ran
 
 
@@ -353,6 +364,9 @@ def _run_group(tests: list, tile: int, N: int, num_sets: int, group_label: str) 
         if fired:  # the simulation stopped at the first firing assertion: name it, as the log does
             print(f"      {fired[0].strip()[:200]}")
         if "BUILDFAIL" in raw:  # the next test would rebuild the same config and fail the same way
+            for ln in build_errors(raw):
+                print(err(f"      {ln.strip()[:240]}"))
+            print(wrn(f"  ║  build log: {os.path.join(RESULTS_DIR, log_name)}"))
             for rest in tests[idx + 1:]:
                 results.append(dict(name=rest["name"], group=rest.get("group", ""), tile=tile, N=N, wall=0.0,
                                     log=log_name, status="NO-RUN", passed=0, failed=0, elements=0, tol=0,
