@@ -8,7 +8,7 @@ An N × N mesh of small T × T systolic arrays multiplies two N × N matrices wi
 |---|---|
 | **81 ns** | to multiply two 16 × 16 matrices, start to result (fp32) |
 | **7.8 TFLOPS** peak | from a 64 × 64 mesh: 4 096 multiply-accumulates every cycle |
-| **89% of peak** sustained | streaming 32 × 32 matrix multiplies inside SIENNA |
+| **95.5% of peak** sustained | streaming 64 × 64 matrix multiplies inside SIENNA (89–91% at 32 × 32) |
 | **bit-exact** | in fp32, bf16 and int8, against a Python model of the hardware |
 
 Times assume a 950 MHz clock ([why](#performance)).
@@ -26,7 +26,7 @@ What makes it fast:
 - **The adder never stalls the multiplier.** A floating-point add takes several cycles. Each processing element therefore keeps several running sums and adds each new product to the next one in turn, so it accepts a product every cycle. Spare banks of running sums and of results let one matrix pair compute while earlier ones are finished and read out.
 - **Weights stay on chip.** A weight cache holds blocks of B that are used again, so the host sends only A. Running sums can also stay in the processing elements from one matrix pair to the next, so a product deeper than N is built up without leaving the mesh.
 - **Small jobs share the mesh.** Several independent small matrix multiplies can be packed side by side into one, each in its own block, and run together. Each processing element ignores everything outside its block, so every result is identical to running the jobs one at a time.
-- **Number format chosen at build time.** One define (`make FMT=bf16` gives `+define+FMT_BF16`; none is fp32) selects fp32, bf16, or int8 with int32 sums, and with it the matching multipliers and adders from [ArithmeticLibrary](https://github.com/SoHam-56/ArithmeticLibrary), through its `fmt_mul` and `fmt_add` wrappers; widths and latencies come from its format package, so the mesh's own files name no format (`make check-fmt`), and a build holds only its format's units (`make check-hier`). Each build runs one format. bf16 multiplies bf16 numbers but keeps every running sum in fp32, and rounds each result back to bf16 only as it is written, so long dot products stay accurate: after 3 072 terms the largest error is 0.3% of the largest result, where bf16 sums were off by 50%.
+- **Number format chosen at build time.** One define (`make FMT=bf16` gives `+define+FMT_BF16`; none is fp32) selects fp32, bf16, or int8 with int32 sums, and with it the matching multipliers and adders from [ArithmeticLibrary](https://github.com/SoHam-56/ArithmeticLibrary), through its `fmt_mul` and `fmt_add` wrappers; widths and latencies come from its format package, so the mesh's own files name no format and a build holds only its format's units (the regression checks both). Each build runs one format. bf16 multiplies bf16 numbers but keeps every running sum in fp32, and rounds each result back to bf16 only as it is written, so long dot products stay accurate: after 3 072 terms the largest error is 0.3% of the largest result, where bf16 sums were off by 50%.
 
 ---
 
@@ -34,7 +34,7 @@ What makes it fast:
 
 > All numbers are measured in cycle-accurate Verilator simulation. Times assume a **950 MHz** clock, the frequency the published TYTAN activation engine of the same project reached in a 45 nm process ([SIENNA](https://github.com/SoHam-56/SIENNA#publication)). Synthesis is planned.
 >
-> The latency figures were measured on 2026-10-05 (SystolicMesh e4a840a); the mesh's RTL has not changed since. The throughput inside SIENNA was measured again on 2026-10-31.
+> The latency tables below were measured on 2026-10-05 (SystolicMesh e4a840a) and were not measured again; the mesh's RTL has changed since (the format wrappers and a fix to the floating-point accumulation hazard), so read them as indicative. The throughput and bandwidth inside SIENNA were measured on 2026-10-31 and 2026-11-01 on today's RTL.
 
 **How latency is measured.** The testbench counts cycles from the start pulse to the result written to the result bank. For one set at N = 16, T = 4:
 
@@ -58,7 +58,17 @@ Small tiles finish sooner, and doubling the matrix size adds little latency beca
 
 ### Throughput
 
-The mesh accepts a new matrix pair every max(T + 2, K, T²) cycles, where K is the depth. That gives a peak of 486 GFLOPS at 16 × 16, 1.95 TFLOPS at 32 × 32 and 7.8 TFLOPS at 64 × 64. Inside SIENNA, streaming 32 × 32 sets from the host (tile size 4, ReLU) sustains 1.78 TFLOPS, 91% of peak, in fp32 and bf16, and 1.73 TFLOPS (89%) in int8: 0.037 µs and 0.038 µs per set. At 64 × 64 (tile sizes 2 to 8) it sustains 7.43 TFLOPS, 95.5% of peak, in every format, with either mesh mode (collapse-k 1 or 0), which needs 465 GB/s of operands in fp32, 233 GB/s in bf16 and 125 GB/s in int8.
+The mesh accepts a new matrix pair every max(T + 2, K, T²) cycles, where K is the depth. That gives a peak of 486 GFLOPS at 16 × 16, 1.95 TFLOPS at 32 × 32 and 7.8 TFLOPS at 64 × 64. Inside SIENNA, streaming 32 × 32 sets from the host (tile size 4, ReLU) sustains 1.78 TFLOPS, 91% of peak, in fp32 and bf16, and 1.73 TFLOPS (89%) in int8: 0.037 µs and 0.038 µs per set. At 64 × 64 (tile sizes 2 to 8) it sustains 7.43 TFLOPS, 95.5% of peak, in every format with full-depth arrays (collapse-k 1). With collapse-k 0 it sustains the same where it was measured: in int8 at tile sizes 2 to 8, in bf16 at 4 and 8, and in fp32 at 8 (the other collapse-k 0 builds are listed under Verification).
+
+Inside SIENNA, at the best tile size (T = 2, ReLU, one set every N + 3 cycles), measured:
+
+| Format | N | Cycles per set | Time per set | Throughput | In / out GB/s |
+|---|---|---|---|---|---|
+| fp32 | 16 · 32 · 64 | 19 · 35 · 67 | 20 · 37 · 71 ns | 0.41 · 1.78 · 7.43 TFLOPS | 103 / 51 · 223 / 111 · 465 / 232 |
+| bf16 | 16 · 32 · 64 | 19 · 35 · 67 | 20 · 37 · 71 ns | 0.41 · 1.78 · 7.43 TFLOPS | 52 / 26 · 112 / 56 · 233 / 116 |
+| int8 | 16 · 32 · 64 | 19 · 36 · 67 | 20 · 38 · 71 ns | 0.41 · 1.73 · 7.43 TOPS | 37 / 13 · 64 / 27 · 125 / 58 |
+
+*In* counts the two operand matrices and each set's settings word (in int8 the settings carry a requantize scale per output column: 358 bytes at 64 × 64, so the operands alone need 116 GB/s); *out* counts the results. Every N and tile size is in SIENNA's `docs/perf_final.txt`.
 
 ### Compared with other matrix engines
 
@@ -79,6 +89,33 @@ Multiply-accumulates per cycle do not depend on the clock, so they compare desig
 
 ---
 
+## Interface
+
+`SystolicMesh` is the module to instantiate. Its stream ports are *credit links* (`credit_link_if`, in ArithmeticLibrary): the receiver grants one credit per free slot, and the sender puts only while it holds one.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `MATRIX_SIZE` (N), `TILE_SIZE` (T) | 32, 4 | mesh size and array size; T divides N |
+| `COLLAPSE_K` | 1 | 1: one full-depth array per output block; 0: depth slices and a reduce tree |
+| `WIDE_READ` | 1 | result words per read beat |
+| `ACC_BANKS`, `RESULT_BANKS` | 4, 4 | running-sum banks per processing element, and result banks |
+| `WC_TILES` | 128 | weight-cache tiles, in two regions so one fills while the other is read |
+
+The format comes from the build's define, not a parameter.
+
+| Port | What it carries |
+|---|---|
+| `staging` (credit link in) | one put per set: weight-cache tile, packing shift, bias flag, and whether the set continues a deeper product |
+| `bias_i` | with the put: a bias per output column, at the accumulator's width |
+| `north_write_*`, `west_write_*` | the two operand matrices, one row per write |
+| `wc_region[2]` (credit link in), `wc_write_*` | weight-cache fills |
+| `result` (credit link out) | N² / `WIDE_READ` beats per set, each with its first and last flags |
+| `matrix_mult_complete_o`, `*_queue_empty_o` | status |
+
+`testbenches/top/TB_SystolicMesh.sv` drives every port and is a working example.
+
+---
+
 ## Verification
 
 `make regression` runs every test at every size: 8 × 8, 16 × 16, 32 × 32 and 64 × 64, every tile size each allows, in fp32, bf16 and int8. It generates the stimulus, builds once per tile size, and compares every output with `scripts/mesh_model.py`, a bit-exact model of the mesh's arithmetic. Every output matches:
@@ -86,14 +123,14 @@ Multiply-accumulates per cycle do not depend on the clock, so they compare desig
 - every tile size;
 - 8 × 8 to 64 × 64 in fp32, bf16 and int8 at every tile size, with full-depth arrays (collapse-k 1), and collapse-k 0 from 8 × 8 to 32 × 32 at every tile size (final sweep, 2026-10-25, ea85621);
 - collapse-k 0 at 64 × 64 at tile sizes 8 to 64 in every format, at tile size 4 in bf16 and int8, and at tile size 2 in int8 (2026-10-31/11-01).
-- Not run at 64 × 64 with collapse-k 0: fp32 at tile size 4, whose simulator passes 2 GB of code and cannot link (glibc's startup objects are built for the small code model: "relocation truncated to fit"; a toolchain limit, not the RTL); bf16 at tile size 2, whose verilation needs more than 256 GB (it stopped at 256.9 GB); fp32 at tile size 2, left out by decision. SIENNA's own fp32 and bf16 collapse-k 0 points at that size were not built either (estimated past the same 2 GB limit), so fp32 and bf16 collapse-k 0 at 64 × 64, tile size 2, are not covered at either level; int8 at tile size 2 and every larger tile size but fp32 at 4 are.
+- Not run at 64 × 64 with collapse-k 0: fp32 at tile size 4, which compiled and then failed to link past the 2 GB code-model limit (glibc's startup objects are built for the small code model: "relocation truncated to fit"; a toolchain limit, not the RTL); bf16 at tile size 2, whose verilation needs more than 256 GB (it stopped at 256.9 GB); fp32 at tile size 2, left out by decision. SIENNA's own fp32 and bf16 collapse-k 0 points at that size were not built either (estimated past the same 2 GB limit), so fp32 and bf16 collapse-k 0 at 64 × 64, tile size 2, are not covered at either level; int8 at tile size 2 and every larger tile size but fp32 at 4 are.
 
 Before the simulations, the regression checks the models against references of their own, so a rounding bug shared by the RTL and `mesh_model.py` still fails:
 - the fp32-to-bf16 rounding model against hand-derived corners and an integer round-to-nearest-even;
 - the `fp32ToBf16` RTL against those corners and the model on 1.2 million values;
-- `mesh_model.py` against float64 over 640 terms, and the stimulus words (`make model-tests`).
+- `mesh_model.py` against float64 over 640 terms, and the stimulus words.
 
-`make regression` runs these checks once; `mesh-regression` runs them before its simulations, and `--no-checks` skips them there.
+`make regression` runs these checks first.
 
 Unit benches check a single array, the int8 element and the packed element's skip on their own.
 
@@ -107,39 +144,41 @@ You need Verilator 5 with a C++20 compiler (its `--timing` mode needs coroutines
 git clone --recursive https://github.com/SoHam-56/SystolicMesh.git
 cd SystolicMesh
 
-make regression SMALL=1                                                 # every check at N = 8 and 16, all formats
-make regression                                                         # N = 8 to 64 (long: use make -jN, N for the memory, below)
-make mesh-regression MATRIX_SIZE=16                                     # one N in fp32, every tile size
-make mesh-regression MATRIX_SIZE=32 REGRESSION_OPTS="--format int8 --tiles 4"
-make mesh-regression MATRIX_SIZE=16 REGRESSION_OPTS="--format bf16 --collapse-k 0"
+make regression SMALL=1                                 # every check at N = 8 and 16, all formats
+make regression                                         # N = 8 to 64 (long: use make -jN, N for the memory, below)
+make regression/bf16/N8_T2/mesh                         # one point of the regression
+make verilator FMT=bf16 MATRIX_SIZE=16 TILE_SIZE=4 TRACE=1   # one simulation with a waveform (vcs: the same on Synopsys VCS)
+make wave                                               # open that waveform
+make lint                                               # Verilator lint of the RTL
+make clean                                              # remove the builds and logs
 ```
 
 Activate the venv in the shell that runs make: some checks call `python3` directly, and without the venv that is the system's Python, which may lack NumPy.
 
 How `make regression` works:
-- It is a list of *points*: the model checks (`model-tests`, `aril-fpu`, `aril-narrow`), and two per format, N and tile size: `bf16/N8_T2/mesh` (full-depth arrays, collapse-k 1) and `bf16/N8_T2/mesh-ck0` (depth slices and the reduce tree, collapse-k 0). `python3 regression.py --action points` lists them.
+- It is a list of *points*: three checks of the models, and two per format, N and tile size: `bf16/N8_T2/mesh` (full-depth arrays, collapse-k 1) and `bf16/N8_T2/mesh-ck0` (depth slices and the reduce tree, collapse-k 0). `python3 regression.py --action points` lists them.
 - Each point is its own make target, so `make -j4 regression SMALL=1` runs four at a time, each simulating on a quarter of the cores; `make regression/bf16/N8_T2/mesh` runs one alone. `SMALL=1` and `FMT=int8` on make's command line narrow it.
-- Each point runs in a private copy of the working tree, git's files without ignored outputs (so stale stimulus or builds never reach it), under `TMPDIR` (point it at a large disk for N = 64), and writes its log to `testbenches/results/regression/`. The run ends with one table there, `regression.log`, and fails if any point fails or did not run; `make regression-summary` prints it again.
-- Memory: pick N in `make -jN` so the points fit, never a bare `-j`. Measured peak of a point's largest process: collapse-k 1 about 0.4 GB at N = 8, 1 GB at 16, 3 GB at 32 and 16 GB at 64 (final sweep); collapse-k 0 about 0.8 GB at N = 8, 6 GB at 16 and 12 GB at 32 (but about 51 GB at 32, tile size 2). Collapse-k 0 at N = 64 needs a large machine: about 95 GB at tile size 8 and 46 GB at 16 (fp32), 50 and 24 GB (bf16), 19 and 9 GB (int8); at tile size 4 211 GB (fp32), 111 GB (bf16) and 39 GB (int8); at tile size 2 more than 256 GB in bf16 and about 90 GB in int8 (measured, 2026-10-31/11-01). Its C++ compiles add to that: fp32 at tile size 4 with 16 compiles beside verilation passed 256 GB. These builds use the large code model (`LARGE_CODE=1`, which the regression sets), but a binary past 2 GB of code still cannot link (fp32 at tile size 4, above).
+- Each point runs in a private copy of the working tree, git's files without ignored outputs (so stale stimulus or builds never reach it), under `TMPDIR` (point it at a large disk for N = 64), and writes its log to `testbenches/results/regression/`. The run ends with one table there, `regression.log`, and fails if any point fails or did not run.
+- Memory: pick N in `make -jN` so the points fit, never a bare `-j`. Measured peak of a point's largest process: collapse-k 1 about 0.4 GB at N = 8, 1 GB at 16, 3 GB at 32 and 16 GB at 64 (final sweep); collapse-k 0 about 0.8 GB at N = 8, 6 GB at 16 and 12 GB at 32 (but about 51 GB at 32, tile size 2). Collapse-k 0 at N = 64 needs a large machine: about 95 GB at tile size 8 and 46 GB at 16 (fp32), 50 and 24 GB (bf16), 19 and 9 GB (int8); at tile size 4 211 GB (fp32), 119 GB (bf16) and 42 GB (int8); at tile size 2 more than 256 GB in bf16 and about 97 GB in int8 (measured, 2026-10-31/11-01). Its C++ compiles add to that: fp32 at tile size 4 with 16 compiles beside verilation passed 256 GB. These builds use the large code model (`LARGE_CODE=1`, which the regression sets), but a binary past 2 GB of code still cannot link (fp32 at tile size 4, above).
 - Run times, measured on 8-core machines: `SMALL=1` takes about 1.9 hours one point at a time and 30 minutes with every point in parallel. At 64 × 64 (final sweep) the longest collapse-k 1 point, fp32 at tile size 64, took 18.5 hours sharing an 8-core machine with five other points, and the collapse-k 0 points took 1.4 hours (int8, tile size 32) to 8.5 hours (fp32, tile size 64).
 
-`mesh-regression`'s results go to `testbenches/results/readiness/`. To run one test by hand:
+To run one test by hand:
 
 ```bash
 python3 scripts/matmul_tests.py --list              # or scripts/conv_tests.py
 python3 scripts/matmul_tests.py --gen mm_random --matrix-size 16
-make                                                # build and simulate with Verilator
+make verilator MATRIX_SIZE=16                       # build and simulate it
 ```
 
 `regression.py` drives the regression, `scripts/matmul_tests.py` and `scripts/conv_tests.py` generate stimulus, and `scripts/mesh_model.py` is the reference.
 
-The layout: `src/` holds the RTL by function (`engine`: the processing element and accumulation unit; `mem`: the output SRAM; `top`: SystolicArray and SystolicMesh), `testbenches/top/` TB_SystolicMesh, `testbenches/units/` TB_PE, TB_PE_pack and TB_SystolicArray (`make TOP_MODULE=TB_PE` builds one), and `scripts/` the model, the stimulus writers, the hierarchy check and the self-tests.
+The layout: `src/` holds the RTL by function (`engine`: the processing element and accumulation unit; `mem`: the output SRAM; `top`: SystolicArray and SystolicMesh), `testbenches/top/` TB_SystolicMesh, `testbenches/units/` TB_PE, TB_PE_pack and TB_SystolicArray, and `scripts/` the model, the stimulus writers, the hierarchy check and the self-tests.
 
 ## Standalone machine
 
 Everything here runs on any Linux machine; nothing depends on the authors' servers.
 
-**You need:** GNU make, git, a C++ compiler with C++20 coroutines (g++ 10 or later), Verilator 5.035 built with that compiler (the version every regression runs on), and Python 3 with the packages in `requirements.txt` (tested with Python 3.11). The released Verilator 5.052 is not supported yet: it runs SystolicMesh's regression and SIENNA's fp32 and int8 points, but stops on bf16 builds (gpnae_tail.sv), on GPNAE's lane bench (a zero-delay warning in TB_gpnae) and on the lint gates (its new warnings, and its removal of --xml-only, which check-hier reads). A Verilator configured with a g++ older than 10 omits the `-fcoroutines` its `--timing` builds need: put a `g++` wrapper that adds it first on `PATH`.
+**You need:** GNU make, git, a C++ compiler with C++20 coroutines (g++ 10 or later), Verilator 5.035 built with that compiler (the version every regression runs on), and Python 3 with the packages in `requirements.txt` (tested with Python 3.11). The released Verilator 5.052 is not supported yet: it runs SystolicMesh's regression and SIENNA's fp32 and int8 points, but stops on bf16 builds (gpnae_tail.sv), on GPNAE's lane bench (a zero-delay warning in TB_gpnae) and on the lint gates (its new warnings, and its removal of --xml-only, which the hierarchy check reads). A Verilator configured with a g++ older than 10 omits the `-fcoroutines` its `--timing` builds need: put a `g++` wrapper that adds it first on `PATH`.
 
 ```bash
 git clone --recursive https://github.com/SoHam-56/SystolicMesh.git && cd SystolicMesh
@@ -192,7 +231,6 @@ What maps to what:
 | `-j`, `--build-jobs`, `--threads`, `SIM_THREADS` | `-j<cores>` (compile) | VCS simulates on one thread |
 | `OPT_FAST=-O0`, `LARGE_CODE=1`, `USE_CCACHE` | not applicable | Verilator build workarounds |
 | `/* verilator lint_off ... */`, `lint_waivers.vlt` | ignored | comments to VCS; the waiver file is Verilator's |
-| `aril-narrow`: fp32ToBf16's bench and its Verilator lint | the bench on VCS | its VCS lint is ArithmeticLibrary's own lint point |
 
 ---
 
