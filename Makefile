@@ -120,6 +120,26 @@ VCS_FLAGS = +incdir+$(SRC_DIR) +incdir+$(TB_DIR) $(FMT_DEF) \
 
 default: verilator
 
+help:
+	@echo "=== SystolicMesh ==="
+	@echo "  FMT=fp32|bf16|int8 picks the number format (default fp32); MATRIX_SIZE, TILE_SIZE, COLLAPSE_K the mesh (default 16, 4, 1)."
+	@echo ""
+	@echo "  make regression SMALL=1       - every check at N = 8 and 16 (FMT=<f> narrows it to one format)"
+	@echo "  make regression               - every check at N = 8 to 64 (use make -jN; see the README for memory)"
+	@echo "  make regression/<point>       - one point, e.g. regression/bf16/N8_T2/mesh (python3 regression.py --action points lists them)"
+	@echo "  make verilator [TRACE=1]      - one simulation of TB_SystolicMesh at FMT, MATRIX_SIZE, TILE_SIZE, COLLAPSE_K"
+	@echo "  make vcs                      - the same on Synopsys VCS; SIM=vcs runs make regression on VCS (README: Running with VCS)"
+	@echo "  make wave                     - open the last waveform (builds one with TRACE=1 if there is none)"
+	@echo "  make lint                     - Verilator lint of the RTL"
+	@echo "  make clean                    - remove the builds and logs"
+	@echo ""
+	@echo "  make help-debug               - targets for debugging a failing or slow run"
+
+help-debug:
+	@echo "=== SystolicMesh: debugging a run ==="
+	@echo "  make debug                    - build with GDB back-traces"
+	@echo "  make perf                     - build with Verilator's profiling (where the simulator spends its time)"
+
 verilator:
 	@echo "=== Verilator simulation for Systolic Array ==="
 	@mkdir -p $(VERILATOR_DIR)
@@ -256,5 +276,5 @@ regression: $(addprefix regression/,$(REG_POINTS))
 regression-summary:
 	@$(REG_SUMMARY)$(if $(REG_RUN), --run $(REG_RUN))
 
-.PHONY: default verilator vcs wave lint debug perf clean mesh-regression regression regression-summary aril-fpu aril-narrow model-tests check-fmt \
+.PHONY: default help help-debug verilator vcs wave lint debug perf clean mesh-regression regression regression-summary aril-fpu aril-narrow model-tests check-fmt \
         check-hier
