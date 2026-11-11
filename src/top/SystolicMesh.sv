@@ -48,7 +48,10 @@ module SystolicMesh #(
 
   logic [DATA_WIDTH-1:0] mem_A[0:2*GLOBAL_ELEMENTS-1];
   logic [DATA_WIDTH-1:0] mem_B[0:2*GLOBAL_ELEMENTS-1];
-  logic [DATA_WIDTH-1:0] wcache[WC_TILES*GLOBAL_ELEMENTS];
+  // The weight cache as rows of one host write: a write lands whole at its row, so no entry needs an address adder or a priority chain (timing).
+  localparam int WC_ROWS = WC_TILES * GLOBAL_ELEMENTS / HOST_WORDS;
+  localparam int WCRW = $clog2(WC_ROWS);
+  logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] wcache[WC_ROWS];
   logic [1:0] in_cached;  // per staging bank: B comes from the cache
   logic [1:0] in_fresh, in_more;  // per staging bank: the set starts a sum; the next set continues it
   logic last_partial;  // the previous accepted set continues into the next one
@@ -139,10 +142,19 @@ module SystolicMesh #(
   assign west_queue_empty_o  = (ptr_A == 0);
 
   // ── Weight cache: written from the north bus, read by the broadcaster for cached sets ──
-  always_ff @(posedge clk_i) begin
-    if (wc_write_enable_i)
-      for (int c = 0; c < HOST_WORDS; c++) wcache[int'(wc_write_addr_i)+c] <= north_write_data_i[c];
+  // The write is registered and lands a cycle after its put; no broadcast reads a tile sooner than two cycles after its last row.
+  logic                                  wc_we_q;
+  logic [WCRW-1:0]                       wc_row_q;
+  logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] wc_data_q;
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) wc_we_q <= 1'b0;
+    else wc_we_q <= wc_write_enable_i;
+  always_ff @(posedge clk_i) begin  // no reset: read only with wc_we_q
+    wc_row_q  <= WCRW'(int'(wc_write_addr_i) / HOST_WORDS);
+    wc_data_q <= north_write_data_i;
   end
+  always_ff @(posedge clk_i)
+    if (wc_we_q) wcache[wc_row_q] <= wc_data_q;
 
   // ── L2: one slot per region; a put opens a fill, the fill's last set closes it, that set's broadcast returns the credit ──
   logic [1:0] wc_ret, wc_adv;  // wc_adv: the advertisement, sent once live
@@ -154,7 +166,7 @@ module SystolicMesh #(
     if (!rstn_i) wc_adv <= 2'b11;
     else if (live) wc_adv <= 2'b00;
   function automatic logic [DATA_WIDTH-1:0] b_word(input int addr);
-    return in_cached[in_rd] ? wcache[int'(in_tile[in_rd])*GLOBAL_ELEMENTS+addr] : mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr];
+    return in_cached[in_rd] ? wcache[(int'(in_tile[in_rd])*GLOBAL_ELEMENTS+addr)/HOST_WORDS][addr%HOST_WORDS] : mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr];
   endfunction
   assign north_queue_empty_o = (ptr_B == 0);
 
@@ -563,7 +575,7 @@ module SystolicMesh #(
     else {sa_q, sa_partial_q, sa_last_partial_q, sa_bias_v_q, sa_shift_q, sa_bq_n_q, sa_cached_q, sa_open_q, sa_last_q} <=
              {start_accept, stg_partial, last_partial, stg_bias_v, stg_pack, bq_n, stg_cached, wc_open[stg_tile[WCTW-1]], stg_last};
   // A staging put, a row write and a cache write, each with its terms, registered for the same reason: a host drives them at the edge too.
-  logic sp_q, sp_full_q, rw_q, rw_full_q, wcw_q, wcw_open_q, wcw_hit_q;
+  logic sp_q, sp_full_q, rw_q, rw_full_q, wcw_q, wcw_open_q, wcw_hit_q, wcw_aligned_q;
   logic wc_hit;  // the cache write's tile is one a staged set reads
   always_comb begin
     wc_hit = 1'b0;
@@ -571,11 +583,13 @@ module SystolicMesh #(
       if (in_full[b] && in_cached[b] && int'(in_tile[b]) == int'(wc_write_addr_i) / GLOBAL_ELEMENTS) wc_hit = 1'b1;
   end
   always_ff @(posedge clk_i or negedge rstn_i)
-    if (!rstn_i) {sp_q, sp_full_q, rw_q, rw_full_q, wcw_q, wcw_open_q, wcw_hit_q} <= '0;
-    else {sp_q, sp_full_q, rw_q, rw_full_q, wcw_q, wcw_open_q, wcw_hit_q} <=
+    if (!rstn_i) {sp_q, sp_full_q, rw_q, rw_full_q, wcw_q, wcw_open_q, wcw_hit_q, wcw_aligned_q} <= '0;
+    else {sp_q, sp_full_q, rw_q, rw_full_q, wcw_q, wcw_open_q, wcw_hit_q, wcw_aligned_q} <=
              {staging.put, in_full[in_wr], west_write_enable_i || north_write_enable_i, in_full[in_wr], wc_write_enable_i,
-              wc_open[wc_write_addr_i[WCAW-1]], wc_hit};
+              wc_open[wc_write_addr_i[WCAW-1]], wc_hit, (int'(wc_write_addr_i) % HOST_WORDS) == 0};
   // Handshake invariants; live only with --assert.
+  a_wc_row_aligned: assert property (@(posedge clk_i) disable iff (!rstn_i) wcw_q |-> wcw_aligned_q)
+    else $error("SystolicMesh: a cache write address is not a multiple of HOST_WORDS (%0d)", HOST_WORDS);
   a_result_bank_free: assert property (@(posedge clk_i) disable iff (!rstn_i) reduce_start |-> out_state[out_wr] == R_FREE)
     else $error("SystolicMesh: a reduce started into a result bank that is not free");
   a_written_in_order: assert property (@(posedge clk_i) disable iff (!rstn_i) set_done |-> out_state[wr_bank_done] == R_WRITING)
