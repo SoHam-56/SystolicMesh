@@ -115,8 +115,32 @@ module ProcessingElement #(
   logic [BANKS-1:0] taken;  // all K products of the bank issued, not yet released
 
   // The first counted product into a slot of a new set is added to zero, so a reused bank needs no clear; later passes add on.
+  // The addend is read a cycle ahead into add_a (timing: the bank and slot select stay out of the adder's first stage): from the bank and
+  // slot the next product joins, with this cycle's write-back passed through when it lands on that slot, and the zero where the next
+  // product is a new set's first into its slot.
   logic [ACC_DATA_WIDTH-1:0] add_a;
-  assign add_a = (prod_fresh && u_cnt < CW'(U)) ? '0 : acc[cur][slot];
+  logic [BW-1:0] cur_n;  // the registered bank and slot after this edge
+  logic [SW-1:0] slot_n;
+  logic [CW-1:0] u_cnt_n;
+  logic          fresh_n;  // prod_fresh next cycle
+  logic          wb_hit;  // the write-back this cycle is the slot read
+  always_comb begin
+    cur_n   = cur;
+    slot_n  = prod_v ? ((slot == SW'(U - 1)) ? '0 : slot + 1'b1) : slot;
+    u_cnt_n = prod_v ? u_cnt + 1'b1 : u_cnt;
+    if (prod_tick && n_prod == CW'(K - 1)) begin
+      u_cnt_n = '0;
+      if (!prod_more) begin
+        cur_n  = (cur == BW'(BANKS - 1)) ? '0 : cur + 1'b1;
+        slot_n = '0;
+      end
+    end
+    fresh_n = (MUL_LAT > 1) ? fresh_d[(MUL_LAT > 1) ? MUL_LAT - 2 : 0] : fresh_i;
+    wb_hit  = sum_v && (bank_dly[ADD_LAT-1] == cur_n) && (slot_dly[ADD_LAT-1] == slot_n);
+  end
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) add_a <= '0;
+    else add_a <= (fresh_n && u_cnt_n < CW'(U)) ? '0 : (wb_hit ? sum : acc[cur_n][slot_n]);
 
   // The product widened to the accumulator (bf16 exactly into fp32, int8 sign-extended into int32), then the accumulator add.
   fmt_mul #(.DATA_WIDTH(DATA_WIDTH), .EXT_DATA_WIDTH(ACC_DATA_WIDTH)) MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i && in_blk),
