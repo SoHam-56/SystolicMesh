@@ -32,6 +32,8 @@ DESIGN_FILES = \
   ../ArithmeticLibrary/src/credit/credit_link_if.sv \
   ../ArithmeticLibrary/src/credit/credit_counter.sv \
   ../ArithmeticLibrary/src/credit/credit_link_checker.sv \
+  ../ArithmeticLibrary/src/mem/mem_array.sv \
+  mem/row_writer.sv \
   top/SystolicMesh.sv \
   top/SystolicArray.sv \
   mem/MeshOutputSram.sv \

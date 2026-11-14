@@ -46,10 +46,18 @@ module SystolicArray #(
   end
 `endif
 
-  // ── Operand banks: A row-major (A[r][kk] at r*K+kk), B row-major (B[kk][c] at kk*N+c) ──
-  logic [DATA_WIDTH-1:0] a_mem[2][AD];
-  logic [DATA_WIDTH-1:0] b_mem[2][AD];
+  // ── Operand banks: A row-major (A[r][kk] at r*K+kk), B row-major (B[kk][c] at kk*N+c), two banks each in one word memory (mem_array) ──
+  // Written WEST_WORDS / NORTH_WORDS words at a time; row r's feed reads A's word (r, kk) and B's word (kk, r) combinationally into a_feed / b_feed.
+  localparam int OB_AW = $clog2(2 * AD);
   logic [$clog2(AD):0] wa, wb;
+  logic [WEST_WORDS-1:0] am_we;
+  logic [WEST_WORDS-1:0][OB_AW-1:0] am_waddr;
+  logic [WEST_WORDS-1:0][DATA_WIDTH-1:0] am_wdata;
+  logic [NORTH_WORDS-1:0] bm_we;
+  logic [NORTH_WORDS-1:0][OB_AW-1:0] bm_waddr;
+  logic [NORTH_WORDS-1:0][DATA_WIDTH-1:0] bm_wdata;
+  logic [N-1:0][OB_AW-1:0] am_raddr, bm_raddr;
+  logic [N-1:0][DATA_WIDTH-1:0] am_rdata, bm_rdata;
   logic lb;  // bank being written
   logic fb;  // oldest queued bank, next to feed
   logic [1:0] ob_full;  // committed, not yet fed out
@@ -117,14 +125,8 @@ module SystolicArray #(
         cmd_p[r]  <= '0;
       end
     end else begin
-      if (west_write_enable_i && wa < AD) begin
-        for (int c = 0; c < WEST_WORDS; c++) a_mem[lb][int'(wa)+c] <= west_write_data_i[c];
-        wa <= wa + WEST_WORDS;
-      end
-      if (north_write_enable_i && wb < AD) begin
-        for (int c = 0; c < NORTH_WORDS; c++) b_mem[lb][int'(wb)+c] <= north_write_data_i[c];
-        wb <= wb + NORTH_WORDS;
-      end
+      if (west_write_enable_i && wa < AD) wa <= wa + WEST_WORDS;  // the words land in a_mem below
+      if (north_write_enable_i && wb < AD) wb <= wb + NORTH_WORDS;
       if (commit_i) begin
         ob_full[lb] <= 1'b1;
         ob_fresh[lb] <= commit_fresh_i;
@@ -186,11 +188,31 @@ module SystolicArray #(
         f_feed[r] <= cmd_f[r];
         m_feed[r] <= cmd_m[r];
         p_feed[r] <= cmd_p[r];
-        a_feed[r] <= cmd_v[r] ? a_mem[cmd_ob[r]][r*K+int'(cmd_kk[r])] : '0;
-        b_feed[r] <= cmd_v[r] ? b_mem[cmd_ob[r]][int'(cmd_kk[r])*N+r] : '0;  // column r of B
+        a_feed[r] <= cmd_v[r] ? am_rdata[r] : '0;
+        b_feed[r] <= cmd_v[r] ? bm_rdata[r] : '0;  // column r of B
       end
     end
   end
+  always_comb begin
+    for (int c = 0; c < WEST_WORDS; c++) begin
+      am_we[c]    = west_write_enable_i && wa < AD;
+      am_waddr[c] = OB_AW'(int'(lb) * AD + int'(wa) + c);
+      am_wdata[c] = west_write_data_i[c];
+    end
+    for (int c = 0; c < NORTH_WORDS; c++) begin
+      bm_we[c]    = north_write_enable_i && wb < AD;
+      bm_waddr[c] = OB_AW'(int'(lb) * AD + int'(wb) + c);
+      bm_wdata[c] = north_write_data_i[c];
+    end
+    for (int r = 0; r < N; r++) begin
+      am_raddr[r] = OB_AW'(int'(cmd_ob[r]) * AD + r * K + int'(cmd_kk[r]));
+      bm_raddr[r] = OB_AW'(int'(cmd_ob[r]) * AD + int'(cmd_kk[r]) * N + r);
+    end
+  end
+  mem_array #(.DEPTH(2 * AD), .WIDTH(DATA_WIDTH), .NW(WEST_WORDS), .NR(N), .SYNC_READ(1'b0)) a_mem (
+      .clk_i(clk_i), .we_i(am_we), .waddr_i(am_waddr), .wmask_i('1), .wdata_i(am_wdata), .re_i('1), .raddr_i(am_raddr), .rdata_o(am_rdata));
+  mem_array #(.DEPTH(2 * AD), .WIDTH(DATA_WIDTH), .NW(NORTH_WORDS), .NR(N), .SYNC_READ(1'b0)) b_mem (
+      .clk_i(clk_i), .we_i(bm_we), .waddr_i(bm_waddr), .wmask_i('1), .wdata_i(bm_wdata), .re_i('1), .raddr_i(bm_raddr), .rdata_o(bm_rdata));
 
   // ── PE grid ───────────────────────────────────────────────────────────
   logic [DATA_WIDTH-1:0] a_w[N][N+1];  // a_w[r][c] enters PE(r,c) from the west

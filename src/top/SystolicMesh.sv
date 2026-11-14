@@ -46,12 +46,15 @@ module SystolicMesh #(
   localparam RP = COLLAPSE_K ? 1 : TILES_PER_DIM;  // partial tiles per output tile
   localparam LW = COLLAPSE_K ? MATRIX_SIZE : TILE_SIZE;  // words per broadcast write
 
-  logic [DATA_WIDTH-1:0] mem_A[0:2*GLOBAL_ELEMENTS-1];
-  logic [DATA_WIDTH-1:0] mem_B[0:2*GLOBAL_ELEMENTS-1];
-  // The weight cache as rows of one host write: a write lands whole at its row, so no entry needs an address adder or a priority chain (timing).
-  localparam int WC_ROWS = WC_TILES * GLOBAL_ELEMENTS / HOST_WORDS;
-  localparam int WCRW = $clog2(WC_ROWS);
-  logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] wcache[WC_ROWS];
+  // The staging banks and the weight cache are row memories (mem_array, one module boundary each, so synthesis can swap them for macros): a row
+  // is one matrix row of MATRIX_SIZE words. The host's write of HOST_WORDS words lands through row_writer as whole rows or a masked part of one;
+  // the broadcast reads TILES_PER_DIM rows a cycle from each, registered in the memory and sliced into the arrays' write data.
+  localparam int ROW_W    = MATRIX_SIZE * DATA_WIDTH;
+  localparam int STG_ROWS = 2 * MATRIX_SIZE;  // two banks of N rows
+  localparam int STG_AW   = $clog2(STG_ROWS);
+  localparam int WC_ROWS  = WC_TILES * MATRIX_SIZE;
+  localparam int WC_AW    = $clog2(WC_ROWS);
+  localparam int HW_PORTS = (HOST_WORDS > MATRIX_SIZE) ? HOST_WORDS / MATRIX_SIZE : 1;  // rows one host write lands in
   logic [1:0] in_cached;  // per staging bank: B comes from the cache
   logic [1:0] in_fresh, in_more;  // per staging bank: the set starts a sum; the next set continues it
   logic last_partial;  // the previous accepted set continues into the next one
@@ -112,11 +115,7 @@ module SystolicMesh #(
       in_pack[1] <= '0;
       in_last <= '0;
     end else begin
-      // A write in the start cycle is the set's last row and lands before the bank switches.
-      if (west_wr_ok)
-        for (int c = 0; c < HOST_WORDS; c++) mem_A[int'(in_wr)*GLOBAL_ELEMENTS+int'(ptr_A)+c] <= west_write_data_i[c];
-      if (north_wr_ok)
-        for (int c = 0; c < HOST_WORDS; c++) mem_B[int'(in_wr)*GLOBAL_ELEMENTS+int'(ptr_B)+c] <= north_write_data_i[c];
+      // A write in the start cycle is the set's last row and lands (in mem_A / mem_B below) before the bank switches.
       // Rewind as each set is accepted; unrewound, the pointer wraps and reads back as empty.
       if (west_write_reset_i || start_accept) ptr_A <= '0;
       else if (west_wr_ok) ptr_A <= ptr_A + HOST_WORDS;
@@ -144,17 +143,55 @@ module SystolicMesh #(
   // ── Weight cache: written from the north bus, read by the broadcaster for cached sets ──
   // The write is registered and lands a cycle after its put; no broadcast reads a tile sooner than two cycles after its last row.
   logic                                  wc_we_q;
-  logic [WCRW-1:0]                       wc_row_q;
+  logic [WCAW-1:0]                       wc_addr_q;  // the write's word address
   logic [HOST_WORDS-1:0][DATA_WIDTH-1:0] wc_data_q;
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) wc_we_q <= 1'b0;
     else wc_we_q <= wc_write_enable_i;
   always_ff @(posedge clk_i) begin  // no reset: read only with wc_we_q
-    wc_row_q  <= WCRW'(int'(wc_write_addr_i) / HOST_WORDS);
+    wc_addr_q <= wc_write_addr_i;
     wc_data_q <= north_write_data_i;
   end
-  always_ff @(posedge clk_i)
-    if (wc_we_q) wcache[wc_row_q] <= wc_data_q;
+
+  // The three row memories, their host-write ports and the broadcast's read ports: port q reads tile row q of the current load row.
+  logic [HW_PORTS-1:0] stgA_we, stgB_we, wc_we;
+  logic [HW_PORTS-1:0][STG_AW-1:0] stgA_waddr, stgB_waddr;
+  logic [HW_PORTS-1:0][WC_AW-1:0] wc_waddr;
+  logic [HW_PORTS-1:0][MATRIX_SIZE-1:0] stgA_wmask, stgB_wmask, wc_wmask;
+  logic [HW_PORTS-1:0][ROW_W-1:0] stgA_wdata, stgB_wdata, wc_wdata;
+  logic [TILES_PER_DIM-1:0][STG_AW-1:0] rdA_addr, rdB_addr;
+  logic [TILES_PER_DIM-1:0][WC_AW-1:0] rdC_addr;
+  logic [TILES_PER_DIM-1:0][ROW_W-1:0] rdA, rdB, rdC;  // the rows read at the last load edge
+  logic rd_cached;  // that load's B came from the cache
+  row_writer #(.ROW_WORDS(MATRIX_SIZE), .WW(HOST_WORDS), .DW(DATA_WIDTH), .ROWS(STG_ROWS)) wr_A (
+      .we_i(west_wr_ok), .waddr_i((STG_AW + $clog2(MATRIX_SIZE))'(int'(in_wr) * GLOBAL_ELEMENTS + int'(ptr_A))), .wdata_i(west_write_data_i),
+      .we_o(stgA_we), .waddr_o(stgA_waddr), .wmask_o(stgA_wmask), .wdata_o(stgA_wdata));
+  row_writer #(.ROW_WORDS(MATRIX_SIZE), .WW(HOST_WORDS), .DW(DATA_WIDTH), .ROWS(STG_ROWS)) wr_B (
+      .we_i(north_wr_ok), .waddr_i((STG_AW + $clog2(MATRIX_SIZE))'(int'(in_wr) * GLOBAL_ELEMENTS + int'(ptr_B))), .wdata_i(north_write_data_i),
+      .we_o(stgB_we), .waddr_o(stgB_waddr), .wmask_o(stgB_wmask), .wdata_o(stgB_wdata));
+  row_writer #(.ROW_WORDS(MATRIX_SIZE), .WW(HOST_WORDS), .DW(DATA_WIDTH), .ROWS(WC_ROWS)) wr_C (
+      .we_i(wc_we_q), .waddr_i(wc_addr_q), .wdata_i(wc_data_q), .we_o(wc_we), .waddr_o(wc_waddr), .wmask_o(wc_wmask), .wdata_o(wc_wdata));
+  mem_array #(.DEPTH(STG_ROWS), .WIDTH(ROW_W), .NW(HW_PORTS), .NR(TILES_PER_DIM), .MASK_W(DATA_WIDTH)) mem_A (
+      .clk_i(clk_i), .we_i(stgA_we), .waddr_i(stgA_waddr), .wmask_i(stgA_wmask), .wdata_i(stgA_wdata),
+      .re_i({TILES_PER_DIM{ctrl_load_en}}), .raddr_i(rdA_addr), .rdata_o(rdA));
+  mem_array #(.DEPTH(STG_ROWS), .WIDTH(ROW_W), .NW(HW_PORTS), .NR(TILES_PER_DIM), .MASK_W(DATA_WIDTH)) mem_B (
+      .clk_i(clk_i), .we_i(stgB_we), .waddr_i(stgB_waddr), .wmask_i(stgB_wmask), .wdata_i(stgB_wdata),
+      .re_i({TILES_PER_DIM{ctrl_load_en}}), .raddr_i(rdB_addr), .rdata_o(rdB));
+  mem_array #(.DEPTH(WC_ROWS), .WIDTH(ROW_W), .NW(HW_PORTS), .NR(TILES_PER_DIM), .MASK_W(DATA_WIDTH)) wcache (
+      .clk_i(clk_i), .we_i(wc_we), .waddr_i(wc_waddr), .wmask_i(wc_wmask), .wdata_i(wc_wdata),
+      .re_i({TILES_PER_DIM{ctrl_load_en}}), .raddr_i(rdC_addr), .rdata_o(rdC));
+  // Tile row sub_r of the load: A's port q is row q * T + sub_r (tile row q's slab); B's is row sub_r * TILES_PER_DIM + q collapsed (each
+  // tile column's N / T rows), row q * T + sub_r otherwise (depth slice q).
+  always_comb
+    for (int q = 0; q < TILES_PER_DIM; q++) begin
+      automatic int rowA = q * TILE_SIZE + load_idx;
+      automatic int rowB = COLLAPSE_K ? load_idx * TILES_PER_DIM + q : q * TILE_SIZE + load_idx;
+      rdA_addr[q] = STG_AW'(int'(in_rd) * MATRIX_SIZE + rowA);
+      rdB_addr[q] = STG_AW'(int'(in_rd) * MATRIX_SIZE + rowB);
+      rdC_addr[q] = WC_AW'(int'(in_tile[in_rd]) * MATRIX_SIZE + rowB);
+    end
+  always_ff @(posedge clk_i)  // no reset: read only with load_we
+    if (ctrl_load_en) rd_cached <= in_cached[in_rd];
 
   // ── L2: one slot per region; a put opens a fill, the fill's last set closes it, that set's broadcast returns the credit ──
   logic [1:0] wc_ret, wc_adv;  // wc_adv: the advertisement, sent once live
@@ -165,9 +202,6 @@ module SystolicMesh #(
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) wc_adv <= 2'b11;
     else if (live) wc_adv <= 2'b00;
-  function automatic logic [DATA_WIDTH-1:0] b_word(input int addr);
-    return in_cached[in_rd] ? wcache[(int'(in_tile[in_rd])*GLOBAL_ELEMENTS+addr)/HOST_WORDS][addr%HOST_WORDS] : mem_B[int'(in_rd)*GLOBAL_ELEMENTS+addr];
-  endfunction
   assign north_queue_empty_o = (ptr_B == 0);
 
   // ── Broadcast: copy a full staging bank into every array's free operand bank, one tile row per cycle ──
@@ -324,46 +358,40 @@ module SystolicMesh #(
       load_we_A <= '{default: 0};
       load_we_B <= '{default: 0};
       if (ctrl_load_en) begin
-        automatic int sub_r = load_idx;  // tile row copied this cycle; block-local, so no register is inferred
-        automatic int addr_calc, rr_L;
         if (COLLAPSE_K) begin
-          // Tile row i takes row sub_r of its T x N slab of A; tile column j takes N/T rows of its N x T slab of B.
-          for (int i_L = 0; i_L < TILES_PER_DIM; i_L++) begin
-            for (int sub_c = 0; sub_c < MATRIX_SIZE; sub_c++) begin
-              addr_calc = ((i_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + sub_c;
-              load_data_A[i_L][0][sub_c] <= mem_A[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
-            end
-            load_we_A[i_L][0] <= 1;
-          end
-          for (int j_L = 0; j_L < TILES_PER_DIM; j_L++) begin
-            for (int w_L = 0; w_L < MATRIX_SIZE; w_L++) begin
-              rr_L = sub_r * TILES_PER_DIM + w_L / TILE_SIZE;
-              addr_calc = rr_L * MATRIX_SIZE + j_L * TILE_SIZE + w_L % TILE_SIZE;
-              load_data_B[0][j_L][w_L] <= b_word(addr_calc);
-            end
-            load_we_B[0][j_L] <= 1;
-          end
+          for (int i_L = 0; i_L < TILES_PER_DIM; i_L++) load_we_A[i_L][0] <= 1;
+          for (int j_L = 0; j_L < TILES_PER_DIM; j_L++) load_we_B[0][j_L] <= 1;
         end else begin
-          for (int i_L = 0; i_L < TILES_PER_DIM; i_L++) begin
-            for (int k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
-              for (int sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
-                addr_calc = ((i_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((k_L * TILE_SIZE) + sub_c);
-                load_data_A[i_L][k_L][sub_c] <= mem_A[int'(in_rd)*GLOBAL_ELEMENTS+addr_calc];
-              end
-              load_we_A[i_L][k_L] <= 1;
-            end
-          end
-          for (int k_L = 0; k_L < TILES_PER_DIM; k_L++) begin
-            for (int j_L = 0; j_L < TILES_PER_DIM; j_L++) begin
-              for (int sub_c = 0; sub_c < TILE_SIZE; sub_c++) begin
-                addr_calc = ((k_L * TILE_SIZE) + sub_r) * MATRIX_SIZE + ((j_L * TILE_SIZE) + sub_c);
-                load_data_B[k_L][j_L][sub_c] <= b_word(addr_calc);
-              end
-              load_we_B[k_L][j_L] <= 1;
-            end
-          end
+          for (int i_L = 0; i_L < TILES_PER_DIM; i_L++)
+            for (int k_L = 0; k_L < TILES_PER_DIM; k_L++) load_we_A[i_L][k_L] <= 1;
+          for (int k_L = 0; k_L < TILES_PER_DIM; k_L++)
+            for (int j_L = 0; j_L < TILES_PER_DIM; j_L++) load_we_B[k_L][j_L] <= 1;
         end
       end
+    end
+  end
+  // The rows read land with load_we. Collapsed: tile row i takes row sub_r of its T x N slab of A (port i, all N words); tile column j takes
+  // N / T rows of its N x T slab of B (word w from port w / T, column j * T + w % T). Otherwise tile (i, k) takes columns k * T .. of A's row
+  // (port i) and tile (k, j) columns j * T .. of B's row (port k).
+  always_comb begin
+    load_data_A = '0;
+    load_data_B = '0;
+    if (COLLAPSE_K) begin
+      for (int i_L = 0; i_L < TILES_PER_DIM; i_L++)
+        for (int sub_c = 0; sub_c < MATRIX_SIZE; sub_c++) load_data_A[i_L][0][sub_c] = rdA[i_L][sub_c*DATA_WIDTH+:DATA_WIDTH];
+      for (int j_L = 0; j_L < TILES_PER_DIM; j_L++)
+        for (int w_L = 0; w_L < MATRIX_SIZE; w_L++)
+          load_data_B[0][j_L][w_L] = rd_cached ? rdC[w_L/TILE_SIZE][(j_L*TILE_SIZE+w_L%TILE_SIZE)*DATA_WIDTH+:DATA_WIDTH]
+                                               : rdB[w_L/TILE_SIZE][(j_L*TILE_SIZE+w_L%TILE_SIZE)*DATA_WIDTH+:DATA_WIDTH];
+    end else begin
+      for (int i_L = 0; i_L < TILES_PER_DIM; i_L++)
+        for (int k_L = 0; k_L < TILES_PER_DIM; k_L++)
+          for (int sub_c = 0; sub_c < TILE_SIZE; sub_c++) load_data_A[i_L][k_L][sub_c] = rdA[i_L][(k_L*TILE_SIZE+sub_c)*DATA_WIDTH+:DATA_WIDTH];
+      for (int k_L = 0; k_L < TILES_PER_DIM; k_L++)
+        for (int j_L = 0; j_L < TILES_PER_DIM; j_L++)
+          for (int sub_c = 0; sub_c < TILE_SIZE; sub_c++)
+            load_data_B[k_L][j_L][sub_c] = rd_cached ? rdC[k_L][(j_L*TILE_SIZE+sub_c)*DATA_WIDTH+:DATA_WIDTH]
+                                                     : rdB[k_L][(j_L*TILE_SIZE+sub_c)*DATA_WIDTH+:DATA_WIDTH];
     end
   end
 
