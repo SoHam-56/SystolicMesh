@@ -124,6 +124,9 @@ module ProcessingElement #(
   logic [CW-1:0] u_cnt_n;
   logic          fresh_n;  // prod_fresh next cycle
   logic          wb_hit;  // the write-back this cycle is the slot read
+  logic [BW-1:0] bank_dly[ADD_LAT];  // the write-back bank, slot and valid of each add in flight; read by the bypass below
+  logic [SW-1:0] slot_dly[ADD_LAT];
+  logic          v_dly   [ADD_LAT];
   always_comb begin
     cur_n   = cur;
     slot_n  = prod_v ? ((slot == SW'(U - 1)) ? '0 : slot + 1'b1) : slot;
@@ -149,10 +152,6 @@ module ProcessingElement #(
       .done_o(sum_v));
 
   // Where each add in flight writes back, and whether it is still in flight.
-  logic [BW-1:0] bank_dly[ADD_LAT];
-  logic [SW-1:0] slot_dly[ADD_LAT];
-  logic          v_dly   [ADD_LAT];
-
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
       for (int i = 0; i < ADD_LAT; i++) begin
