@@ -188,6 +188,7 @@ lint:
 		$(VERILATOR_FLAGS) \
 		$(addprefix $(SRC_DIR)/,$(DESIGN_FILES)) \
 		$(TB_DIR)/$(TESTBENCH)
+	@$(PYTHON) $(SRC_DIR)/../ArithmeticLibrary/scripts/declared_first.py --label "mesh $(FMT)" --top SystolicMesh $(patsubst +define+%,-D %,$(FMT_DEF)) -D SYNTHESIS $(addprefix $(SRC_DIR)/,$(DESIGN_FILES))
 	@echo "-- Lint check complete"
 
 debug: VERILATOR_FLAGS += --debug --gdbbt

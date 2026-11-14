@@ -153,6 +153,8 @@ module SystolicMesh #(
     wc_data_q <= north_write_data_i;
   end
 
+  logic ctrl_load_en;  // the broadcast is copying a staging bank (declared here, before the memories read it)
+  integer load_idx;  // its tile row
   // The three row memories, their host-write ports and the broadcast's read ports: port q reads tile row q of the current load row.
   logic [HW_PORTS-1:0] stgA_we, stgB_we, wc_we;
   logic [HW_PORTS-1:0][STG_AW-1:0] stgA_waddr, stgB_waddr;
@@ -223,9 +225,8 @@ module SystolicMesh #(
   logic arrays_next_final;  // and the set after it is final too
   logic arrays_busy;
   logic reducers_ready, reducers_busy, reducers_read_done, reducers_written;
-  logic ctrl_load_en, commit_q, commit_fresh_q, commit_more_q, set_launch, reduce_start;
+  logic commit_q, commit_fresh_q, commit_more_q, set_launch, reduce_start;
   logic [2:0] commit_pack_q;
-  integer load_idx;
 
   assign loading_done  = (load_idx >= TILE_SIZE - 1);  // one tile row per cycle
   assign ctrl_load_en  = (bstate == B_LOAD);

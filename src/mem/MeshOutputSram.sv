@@ -1,3 +1,5 @@
+`timescale 1ns / 100ps
+
 module MeshOutputSram #(
     parameter DEPTH = 1024,
     parameter DATA_WIDTH = 32,
