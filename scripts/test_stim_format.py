@@ -21,7 +21,8 @@ def _wrap32(v):
 
 
 def test_fp32_expected_is_the_mesh_result():
-    # N=64 padding set 9001: output 1085 is a near-zero cancellation; the RTL returns 0x38050000 (3.1710e-5), the
+    # N=64 padding set 9001: output 1085 is a near-zero cancellation; the RTL returns 0x38070000 (3.2187e-5) with 8 partial-sum
+    # slots (fp32Adder's 7 stages since round G, 2026-11-15; 0x38050000 with the 6 slots before), the
     # correctly rounded sum is 0x3803ab66 (3.1392e-5), 1.01% away, so a golden from float64 fails correct hardware
     mt._seed(9001)
     A = np.random.uniform(-1, 1, (64, 64)).astype(np.float32)
@@ -31,7 +32,7 @@ def test_fp32_expected_is_the_mesh_result():
         sf.write_set(A, B, d)
         C = [int(x, 16) for x in open(os.path.join(d, "matrixC.mem")).read().split()]
         A_words = open(os.path.join(d, "matrixA.mem")).read().split()
-    assert C[1085] == 0x38050000, hex(C[1085])
+    assert C[1085] == 0x38070000, hex(C[1085])  # the model's hardware-order sum at U = 8
     assert A_words[0] == f"{int(A.view(np.uint32).flat[0]):08x}"  # operands still written as their float32 bits
 
 

@@ -75,12 +75,20 @@ def test_bf16_k640_within_one_ulp():
 
 
 def test_unskipped_mesh_differs():
-    # The probe's finding: without the skip, a block starting mid-rotation rounds differently from its job alone.
+    # The probe's finding at U = 6 (fp32Adder's 5 stages + 1): without the skip, a block starting mid-rotation rounds differently from
+    # its job alone, since its products share slots with other blocks' and the tree groups them differently. With U = 8 (fp32Adder's 7
+    # stages since round G, 2026-11-15) the slots divide N: every product of a block sits in its own slot with only the other blocks'
+    # zeros, which add exactly, and the tree over the block's slots is the job's own tree, so the unskipped mesh equals the job alone.
+    # The skip then costs nothing in words either way; this keeps the probe's case and asserts whichever the slot count implies.
     f = fpu.FORMATS["fp32"]
     A, B, bias, b = _case("fp32", 16, 2, 7)
     plain = mm.matmul(f, [(A, B)], 16, 4, 1, bias)
     alone = np.hstack([_alone(f, A, B, bias, 16, c, b) for c in range(16 // b)])
-    assert int(np.sum(plain != alone)) > 0
+    U = mm._slots(f, 16)
+    if 16 % U == 0 and (U & (U - 1)) == 0:
+        assert int(np.sum(plain != alone)) == 0, U
+    else:
+        assert int(np.sum(plain != alone)) > 0, U
 
 
 
