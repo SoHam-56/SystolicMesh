@@ -24,9 +24,8 @@ module ProcessingElement #(
     output logic                         fresh_o,
     output logic                         more_o,
     output logic [                  2:0] pack_o,
-    input  logic [               BW-1:0] rd_bank_i,   // bank the reader looks at
-    output logic [U-1:0][sienna_fmt_pkg::ACC_DATA_WIDTH-1:0] partial_o,   // that bank's partial sums; a slot no product reached reads +0
-    input  logic                         release_i,   // the reader is done with rd_bank_i
+    output logic [U-1:0][sienna_fmt_pkg::ACC_DATA_WIDTH-1:0] partial_o,   // the oldest unreleased bank's partial sums; a slot no product reached reads +0
+    input  logic                         release_i,   // the reader is done with that bank
     output logic [            BANKS-1:0] final_o      // per bank: a finished set, all adds written back
 );
   localparam int DATA_WIDTH = sienna_fmt_pkg::DATA_WIDTH;  // operands
@@ -109,6 +108,7 @@ module ProcessingElement #(
   logic [ACC_DATA_WIDTH-1:0] acc[BANKS][U];
   logic [U-1:0] wr_mask[BANKS];  // per bank: slots a counted product reached this set
   logic [BW-1:0] cur;  // bank the next product joins
+  logic [BW-1:0] rd_bank;  // the oldest unreleased bank, the reader's: every PE keeps its own copy, so the array's select fans out nowhere
   logic [SW-1:0] slot;  // partial sum within it
   logic [CW-1:0] n_prod;  // products of the pass seen, counted or not
   logic [CW-1:0] u_cnt;  // counted products of the pass
@@ -181,6 +181,7 @@ module ProcessingElement #(
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
       cur     <= '0;
+      rd_bank <= '0;
       slot    <= '0;
       n_prod  <= '0;
       u_cnt   <= '0;
@@ -212,13 +213,14 @@ module ProcessingElement #(
       end
       for (int b = 0; b < BANKS; b++) if (taken[b] && !pending[b]) final_o[b] <= 1'b1;
       if (release_i) begin
-        taken[rd_bank_i]   <= 1'b0;
-        final_o[rd_bank_i] <= 1'b0;
+        taken[rd_bank]   <= 1'b0;
+        final_o[rd_bank] <= 1'b0;
+        rd_bank          <= (rd_bank == BW'(BANKS - 1)) ? '0 : rd_bank + 1'b1;
       end
     end
   end
 
-  always_comb for (int u = 0; u < U; u++) partial_o[u] = wr_mask[rd_bank_i][u] ? acc[rd_bank_i][u] : '0;
+  always_comb for (int u = 0; u < U; u++) partial_o[u] = wr_mask[rd_bank][u] ? acc[rd_bank][u] : '0;
 
 `ifndef SYNTHESIS
   a_bank_free: assert property (@(posedge clk_i) disable iff (!rstn_i) (prod_tick && n_prod == '0) |-> !taken[cur])
@@ -227,8 +229,8 @@ module ProcessingElement #(
     else $error("ProcessingElement: the pass flags are out of step with the multiplier");
   a_fresh_slot0: assert property (@(posedge clk_i) disable iff (!rstn_i) (prod_v && u_cnt == '0 && prod_fresh) |-> slot == '0)
     else $error("ProcessingElement: a new set started part way through a bank's slots");
-  a_release_final: assert property (@(posedge clk_i) disable iff (!rstn_i) release_i |-> final_o[rd_bank_i])
-    else $error("ProcessingElement: bank %0d released before its set was final", rd_bank_i);
+  a_release_final: assert property (@(posedge clk_i) disable iff (!rstn_i) release_i |-> final_o[rd_bank])
+    else $error("ProcessingElement: bank %0d released before its set was final", rd_bank);
   a_pack_range: assert property (@(posedge clk_i) disable iff (!rstn_i) v_i |-> int'(pack_i) < LGK)
     else $error("ProcessingElement: pack shift %0d leaves blocks narrower than 2 of K=%0d", pack_i, K);
   a_pack_count: assert property (@(posedge clk_i) disable iff (!rstn_i)

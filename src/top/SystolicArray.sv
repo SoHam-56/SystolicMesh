@@ -255,7 +255,6 @@ module SystolicArray #(
           .more_o   (m_w[r][c+1]),
           .pack_i   (p_w[r][c]),
           .pack_o   (p_w[r][c+1]),
-          .rd_bank_i(rb),
           .partial_o(part[r][c]),
           .release_i(release_i),
           .final_o  (pe_final[r*N+c])
@@ -263,30 +262,32 @@ module SystolicArray #(
     end
   end
 
-  logic all_final, all_next;
+  // Per bank, registered: the set in it is final in every PE (one cycle after the last PE's final_o; cleared with the release). The AND
+  // over N*N PEs then ends in a flop instead of running on into the mesh's reducer start, and the bank select picks a flop, not a tree.
+  logic [BANKS-1:0] bank_final_c, bank_final;
   logic [BW-1:0] rb_n;
   assign rb_n = (rb == BW'(BANKS - 1)) ? '0 : rb + 1'b1;
-  always_comb begin
-    all_final = ab_busy[rb];
-    all_next  = ab_busy[rb_n];
-    for (int p = 0; p < N * N; p++) begin
-      all_final &= pe_final[p][rb];
-      all_next  &= pe_final[p][rb_n];
+  always_comb
+    for (int b = 0; b < BANKS; b++) begin
+      bank_final_c[b] = ab_busy[b];
+      for (int p = 0; p < N * N; p++) bank_final_c[b] &= pe_final[p][b];
     end
-  end
-  assign set_final_o  = all_final;
-  assign next_final_o = all_next;
+  assign set_final_o  = bank_final[rb];
+  assign next_final_o = bank_final[rb_n];
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
       ab_busy      <= '0;
+      bank_final   <= '0;
       rb           <= '0;
       read_data_o  <= '0;
       read_valid_o <= 1'b0;
     end else begin
       if (launch && ob_fresh[fb]) ab_busy[ab_next] <= 1'b1;
+      bank_final <= bank_final_c;
       if (release_i) begin
         ab_busy[rb] <= 1'b0;
+        bank_final[rb] <= 1'b0;
         rb <= (rb == BW'(BANKS - 1)) ? '0 : rb + 1'b1;
       end
       read_valid_o <= read_enable_i;

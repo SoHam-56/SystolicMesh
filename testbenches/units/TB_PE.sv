@@ -26,7 +26,7 @@ module TB_PE #(
   ) dut (
       .clk_i(clk), .rstn_i(rstn), .a_i(a), .b_i(b), .v_i(v), .fresh_i(fresh), .more_i(more), .pack_i(3'b0),
       .a_o(), .b_o(), .v_o(), .fresh_o(), .more_o(), .pack_o(),
-      .rd_bank_i(rd_bank), .partial_o(partial), .release_i(rel), .final_o(fin)
+      .partial_o(partial), .release_i(rel), .final_o(fin)
   );
 
   // fp32 bits of an integer below 2^24 in magnitude, built by hand.

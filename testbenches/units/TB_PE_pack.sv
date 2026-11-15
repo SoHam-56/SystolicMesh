@@ -38,7 +38,7 @@ module pe_pack_bench #(
                         .COL((p * (K - 1)) / (NP - 1))) dut (
         .clk_i(clk), .rstn_i(rstn), .a_i(a), .b_i(b), .v_i(v), .fresh_i(fresh), .more_i(1'b0), .pack_i(pack),
         .a_o(), .b_o(), .v_o(), .fresh_o(), .more_o(), .pack_o(pack_o[p]),
-        .rd_bank_i(rd_bank), .partial_o(part[p]), .release_i(rel), .final_o(fin[p]));
+        .partial_o(part[p]), .release_i(rel), .final_o(fin[p]));
     initial muls[p] = 0;
     always @(posedge clk) if (dut.prod_v) muls[p]++;
     always @(negedge clk) if (rstn && pack_o[p] !== pack_q) pass_errs++;  // pack_o is pack_i one cycle later
