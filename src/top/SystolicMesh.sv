@@ -154,9 +154,10 @@ module SystolicMesh #(
   // L3: the result push.
   logic [$clog2(BEATS + 1)-1:0] pb_idx;  // next beat of the oldest result to read
   logic res_rd, res_put, rq_first, rq_last, rq_pk;  // a read, a beat on the result link, the result's first and last, packed
+  logic res_rd_q, rq_first_q, rq_last_q, rq_pk_q;  // the read a cycle on, at the memory: its address registered (the bank and beat select into the read mux was the mesh's path)
   logic [$clog2(RES_MAX + 1)-1:0] res_cnt;  // result credits held
   logic [WIDE_READ-1:0][RESULT_DATA_WIDTH-1:0] res_words;
-  logic [WIDE_READ-1:0][31:0] wide_addr;
+  logic [WIDE_READ-1:0][31:0] wide_addr, wide_addr_q;
   // Per output tile: U partials from each depth slice, flattened for its reducer; the tiles' and reducers' handshakes.
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][RPU-1:0][ACC_DATA_WIDTH-1:0] t_data;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] t_ren;
@@ -349,7 +350,7 @@ module SystolicMesh #(
         out_state[wr_bank_done] <= R_FULL;
         wr_bank_done <= next_bank(wr_bank_done);
       end
-      if (res_put && rq_last) begin
+      if (res_put && rq_last_q) begin
         out_state[out_rd] <= R_FREE;
         out_rd <= next_bank(out_rd);
       end
@@ -435,28 +436,41 @@ module SystolicMesh #(
   always_comb
     for (int p = 0; p < NUM_TILES; p++) sram_addr_bank[p] = sram_addr_agg[p];  // each reducer adds its own bank offset
 
-  // ── L3: the oldest result goes out as BEATS wide beats, one read a cycle while a credit is held past this cycle's put ──
+  // ── L3: the oldest result goes out as BEATS wide beats, one read a cycle while a credit is held past this cycle's put and the read in
+  // flight; a read's address is registered, the memory reads the cycle after, the beat is put the cycle after that ──
   // Beat i word k is element k * BEATS + i; packed, it is column k % N of row (k / N) * BEATS + i, so a lane holds a column block.
   credit_counter #(.MAX(RES_MAX), .CRW(RES_CRW)) res_cc (.clk_i(clk_i), .rstn_i(rstn_i), .put_i(res_put), .credit_i(result.credit),
                                                         .has_credit_o(), .count_o(res_cnt));
-  assign res_rd = out_full[out_rd] && (int'(pb_idx) < BEATS) && (int'(res_cnt) > int'(res_put));
+  assign res_rd = out_full[out_rd] && (int'(pb_idx) < BEATS) && (int'(res_cnt) > int'(res_put) + int'(res_rd_q));
   assign result.put  = res_put;
-  assign result.data = {rq_pk, rq_last, rq_first, res_words};
+  assign result.data = {rq_pk_q, rq_last_q, rq_first_q, res_words};
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) begin
-      pb_idx   <= '0;
-      rq_first <= 1'b0;
-      rq_last  <= 1'b0;
-      rq_pk    <= 1'b0;
+      pb_idx     <= '0;
+      rq_first   <= 1'b0;
+      rq_last    <= 1'b0;
+      rq_pk      <= 1'b0;
+      res_rd_q   <= 1'b0;
+      rq_first_q <= 1'b0;
+      rq_last_q  <= 1'b0;
+      rq_pk_q    <= 1'b0;
     end else begin
+      res_rd_q <= res_rd;
       if (res_rd) begin
         rq_first <= pb_idx == 0;
         rq_last  <= int'(pb_idx) == BEATS - 1;
         rq_pk    <= out_pk[out_rd];
         pb_idx   <= pb_idx + 1'b1;
       end
-      if (res_put && rq_last) pb_idx <= '0;  // reads stopped at the last beat, so this never meets a read
+      if (res_rd_q) begin
+        rq_first_q <= rq_first;
+        rq_last_q  <= rq_last;
+        rq_pk_q    <= rq_pk;
+      end
+      if (res_put && rq_last_q) pb_idx <= '0;  // reads stopped at the last beat, so this never meets a read
     end
+  always_ff @(posedge clk_i)
+    if (res_rd) wide_addr_q <= wide_addr;  // no reset: read only with res_rd_q
 
   always_comb
     for (int k = 0; k < WIDE_READ; k++)
@@ -475,8 +489,8 @@ module SystolicMesh #(
       .we_i(sram_we_agg),
       .waddr_i(sram_addr_bank),
       .wdata_i(sram_data_agg),
-      .wide_enable_i(res_rd),
-      .wide_addr_i(wide_addr),
+      .wide_enable_i(res_rd_q),
+      .wide_addr_i(wide_addr_q),
       .wide_data_o(res_words),
       .wide_valid_o(res_put)
   );
