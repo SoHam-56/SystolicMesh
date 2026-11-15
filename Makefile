@@ -46,6 +46,7 @@ DESIGN_FILES = \
   ../ArithmeticLibrary/src/multipliers/fp32Multiplier.sv \
   ../ArithmeticLibrary/src/multipliers/bf16Multiplier.sv \
   ../ArithmeticLibrary/src/multipliers/bf16WideMultiplier.sv \
+  ../ArithmeticLibrary/src/multipliers/intMulPipe.sv \
   ../ArithmeticLibrary/src/multipliers/int8Multiplier.sv \
   ../ArithmeticLibrary/src/converters/fp32ToBf16.sv \
   ../ArithmeticLibrary/src/adders/LZC.sv \
