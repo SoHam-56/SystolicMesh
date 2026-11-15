@@ -38,17 +38,13 @@ module SystolicArray #(
   localparam int AD = N * K;  // A and B each hold N*K words per bank
   localparam int BW = (BANKS > 1) ? $clog2(BANKS) : 1;
   localparam int KW = (K > 1) ? $clog2(K) : 1;
+  localparam int OB_AW = $clog2(2 * AD);  // the operand banks' word address
+  // A continuing pass reads the slots its set's previous pass wrote: with K < S a PE reuses each slot every pass, so the pass waits S cycles.
+  localparam int S = sienna_fmt_pkg::add_latency(ACC_DATA_WIDTH) + 1;  // a PE slot is ready S cycles after its add issues
+  localparam int GW = $clog2(S + 1);
 
-`ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
-  initial begin
-    if ((AD % WEST_WORDS) != 0 || (AD % NORTH_WORDS) != 0)
-      $error("SystolicArray: write widths %0d/%0d must divide %0d", WEST_WORDS, NORTH_WORDS, AD);
-  end
-`endif
-
-  // ── Operand banks: A row-major (A[r][kk] at r*K+kk), B row-major (B[kk][c] at kk*N+c), two banks each in one word memory (mem_array) ──
+  // Operand banks: A row-major (A[r][kk] at r*K+kk), B row-major (B[kk][c] at kk*N+c), two banks each in one word memory (mem_array).
   // Written WEST_WORDS / NORTH_WORDS words at a time; row r's feed reads A's word (r, kk) and B's word (kk, r) combinationally into a_feed / b_feed.
-  localparam int OB_AW = $clog2(2 * AD);
   logic [$clog2(AD):0] wa, wb;
   logic [WEST_WORDS-1:0] am_we;
   logic [WEST_WORDS-1:0][OB_AW-1:0] am_waddr;
@@ -63,9 +59,6 @@ module SystolicArray #(
   logic [1:0] ob_full;  // committed, not yet fed out
   logic [1:0] ob_fresh, ob_more;  // per operand bank: the pass's flags
   logic [2:0] ob_pack[2];  // per operand bank: the pass's pack shift
-
-  assign load_ready_o = !ob_full[lb];
-
   // Feed commands: row 0 and column 0 see the command now; row r and column c see it r and c cycles later.
   logic          cmd_v [N];
   logic [KW-1:0] cmd_kk[N];
@@ -79,14 +72,34 @@ module SystolicArray #(
   logic [BW-1:0] ab_next;  // accumulator bank the next set lands in, as the PEs count it
   logic [BANKS-1:0] ab_busy;  // a set was fed into the bank and not yet released
   logic launch;  // a queued set starts feeding this cycle
+  logic spaced;  // a continuing pass may launch now
+  // Skewed feed registers.
+  logic [DATA_WIDTH-1:0] a_feed[N], b_feed[N];
+  logic v_feed[N], f_feed[N], m_feed[N];
+  logic [2:0] p_feed[N];
+  // The PE grid.
+  logic [DATA_WIDTH-1:0] a_w[N][N+1];  // a_w[r][c] enters PE(r,c) from the west
+  logic [DATA_WIDTH-1:0] b_n[N+1][N];  // b_n[r][c] enters PE(r,c) from the north
+  logic v_w[N][N+1], f_w[N][N+1], m_w[N][N+1];  // valid and pass flags travel east with A
+  logic [2:0] p_w[N][N+1];  // pack shift travels east with A
+  logic [U-1:0][ACC_DATA_WIDTH-1:0] part[N][N];
+  logic [BANKS-1:0] pe_final[N*N];
+  // The reader's bank, and per bank, registered, whether its set is final in every PE.
+  logic [BW-1:0] rb;  // oldest unread accumulator bank
+  logic [BW-1:0] rb_n;
+  logic [BANKS-1:0] bank_final_c, bank_final;
 
-  // A continuing pass reads the slots its set's previous pass wrote: with K < S a PE reuses each slot every pass, so the pass waits S cycles.
-  localparam int S = sienna_fmt_pkg::add_latency(ACC_DATA_WIDTH) + 1;  // a PE slot is ready S cycles after its add issues
-  localparam int GW = $clog2(S + 1);
-`ifndef SYNTHESIS  // the PEs' slot count: fewer slots reuse one within a pass before its add lands, and the spacing below assumes U = K under S
+`ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
+  initial begin
+    if ((AD % WEST_WORDS) != 0 || (AD % NORTH_WORDS) != 0)
+      $error("SystolicArray: write widths %0d/%0d must divide %0d", WEST_WORDS, NORTH_WORDS, AD);
+  end
+  // the PEs' slot count: fewer slots reuse one within a pass before its add lands, and the spacing below assumes U = K under S
   initial if (U != ((K < S) ? K : S)) $error("SystolicArray: U=%0d must be min(K=%0d, %0d)", U, K, S);
 `endif
-  logic spaced;  // a continuing pass may launch now
+
+  assign load_ready_o = !ob_full[lb];
+
   if (K < S) begin : G_SPACE
     logic [GW-1:0] since;  // cycles since the last launch, saturating at S
     always_ff @(posedge clk_i or negedge rstn_i)
@@ -168,10 +181,6 @@ module SystolicArray #(
   end
 
   // ── Skewed feed registers ─────────────────────────────────────────────
-  logic [DATA_WIDTH-1:0] a_feed[N], b_feed[N];
-  logic v_feed[N], f_feed[N], m_feed[N];
-  logic [2:0] p_feed[N];
-
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
       for (int r = 0; r < N; r++) begin
@@ -215,14 +224,6 @@ module SystolicArray #(
       .clk_i(clk_i), .we_i(bm_we), .waddr_i(bm_waddr), .wmask_i('1), .wdata_i(bm_wdata), .re_i('1), .raddr_i(bm_raddr), .rdata_o(bm_rdata));
 
   // ── PE grid ───────────────────────────────────────────────────────────
-  logic [DATA_WIDTH-1:0] a_w[N][N+1];  // a_w[r][c] enters PE(r,c) from the west
-  logic [DATA_WIDTH-1:0] b_n[N+1][N];  // b_n[r][c] enters PE(r,c) from the north
-  logic v_w[N][N+1], f_w[N][N+1], m_w[N][N+1];  // valid and pass flags travel east with A
-  logic [2:0] p_w[N][N+1];  // pack shift travels east with A
-  logic [U-1:0][ACC_DATA_WIDTH-1:0] part[N][N];
-  logic [BANKS-1:0] pe_final[N*N];
-  logic [BW-1:0] rb;  // oldest unread accumulator bank
-
   for (genvar r = 0; r < N; r++) begin : FEED
     assign a_w[r][0] = a_feed[r];
     assign v_w[r][0] = v_feed[r];
@@ -264,8 +265,6 @@ module SystolicArray #(
 
   // Per bank, registered: the set in it is final in every PE (one cycle after the last PE's final_o; cleared with the release). The AND
   // over N*N PEs then ends in a flop instead of running on into the mesh's reducer start, and the bank select picks a flop, not a tree.
-  logic [BANKS-1:0] bank_final_c, bank_final;
-  logic [BW-1:0] rb_n;
   assign rb_n = (rb == BW'(BANKS - 1)) ? '0 : rb + 1'b1;
   always_comb
     for (int b = 0; b < BANKS; b++) begin
@@ -298,6 +297,9 @@ module SystolicArray #(
   assign busy_o = (|ob_full) || feeding || (|ab_busy);
 
 `ifndef SYNTHESIS
+  int gap_q;  // cycles since the last launch, for a_continue_spaced
+  int early_passes;  // cover: continuing passes that were ready to launch under S cycles after the previous launch (the spacing holds them)
+  logic early_q;  // the queued continuing pass was ready early
   // The last row may be written in the commit cycle itself.
   a_commit_loaded: assert property (@(posedge clk_i) disable iff (!rstn_i)
                                     commit_i |-> (int'(wa) + (west_write_enable_i ? WEST_WORDS : 0) == AD &&
@@ -312,16 +314,12 @@ module SystolicArray #(
   a_read_final: assert property (@(posedge clk_i) disable iff (!rstn_i) (read_enable_i || release_i) |-> set_final_o)
     else $error("SystolicArray: read or release with no final set");
   // The PEs' a_slot_ready one level up, on its own counter: a continuing pass launches at least S cycles after the previous launch.
-  int gap_q;
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) gap_q <= S;
     else if (launch) gap_q <= 1;
     else if (gap_q < S) gap_q <= gap_q + 1;
   a_continue_spaced: assert property (@(posedge clk_i) disable iff (!rstn_i) (launch && !ob_fresh[fb]) |-> gap_q >= S)
     else $error("SystolicArray: a continuing pass launched %0d cycles after the previous one, its slots need %0d", gap_q, S);
-  // Cover for the benches: continuing passes that were ready to launch under S cycles after the previous launch (the spacing holds them).
-  int early_passes;
-  logic early_q;  // the queued continuing pass was ready early
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) begin
       early_passes <= 0;

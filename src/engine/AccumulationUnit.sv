@@ -47,6 +47,17 @@ module AccumulationUnit #(
   logic [PW-1:0] rd_idx;
   logic [RBW-1:0] rd_bank;
   logic [N-1:0][ACC_DATA_WIDTH-1:0] rd_bias;
+  // Pixel index and result bank travel beside the data, LAT cycles from read to write.
+  logic          tag_v   [LAT];
+  logic [PW-1:0] tag_idx [LAT];
+  logic [RBW-1:0] tag_bank[LAT];
+  // The tree: level 0 holds the P partials, one cycle behind the read.
+  logic [ACC_DATA_WIDTH-1:0] lvl_d[LEVELS+1][P];
+  logic                  lvl_v[LEVELS+1];
+  // The pixel and bank the tree's output belongs to.
+  logic [PW-1:0] w_idx;
+  logic [RBW-1:0] w_bank;
+  logic in_tree;
 
   assign ready_o   = !reading || read_done_o;  // the next set may start as the last pixel is read
   assign rd_en_o   = reading;
@@ -76,9 +87,6 @@ module AccumulationUnit #(
   end
 
   // Pixel index and result bank travel beside the data, LAT cycles from read to write.
-  logic          tag_v   [LAT];
-  logic [PW-1:0] tag_idx [LAT];
-  logic [RBW-1:0] tag_bank[LAT];
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
       for (int s = 0; s < LAT; s++) begin
@@ -99,8 +107,6 @@ module AccumulationUnit #(
   end
 
   // A read issued at cycle t presents its data at t+1, so level 0 is valid one cycle behind.
-  logic [ACC_DATA_WIDTH-1:0] lvl_d[LEVELS+1][P];
-  logic                  lvl_v[LEVELS+1];
   assign lvl_v[0] = tag_v[0];
   for (genvar k = 0; k < P; k++) begin : L0
     assign lvl_d[0][k] = tile_data_i[k];
@@ -143,8 +149,6 @@ module AccumulationUnit #(
     assign lvl_v[l+1] = done_bits[0];
   end
 
-  logic [PW-1:0] w_idx;
-  logic [RBW-1:0] w_bank;
   assign w_idx  = tag_idx[LAT-1];
   assign w_bank = tag_bank[LAT-1];
 
@@ -158,7 +162,6 @@ module AccumulationUnit #(
                         ((TILE_ROW_OFFSET + int'(w_idx) / N) * MATRIX_WIDTH) + (TILE_COL_OFFSET + int'(w_idx) % N);
   assign written_o    = write_en_o && (w_idx == PW'(PIXELS - 1));
 
-  logic in_tree;
   always_comb begin
     in_tree = 1'b0;
     for (int s = 0; s < LAT; s++) in_tree |= tag_v[s];

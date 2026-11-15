@@ -37,6 +37,39 @@ module ProcessingElement #(
   localparam int CW = $clog2(K + 1);
   localparam int LGK = (K > 1) ? $clog2(K) : 1;
 
+  // The input's place in its pass, and whether it lies in this PE's block (always, unpacked).
+  logic [CW-1:0] k_in;
+  logic in_blk;
+  // The pass flags, delayed to meet their product out of the multiplier; v_d ticks for every product, counted or not.
+  logic fresh_d[MUL_LAT], more_d[MUL_LAT], v_d[MUL_LAT], inb_d[MUL_LAT];
+  logic [2:0] pack_d[MUL_LAT];
+  logic prod_fresh, prod_more, prod_tick;
+  logic [2:0] prod_pack;
+  // The product and the sum; prod_v: a counted product, only those reach the multiplier.
+  logic [ACC_DATA_WIDTH-1:0] prod, sum;
+  logic prod_v, sum_v;
+  // The banks of partial sums and their bookkeeping.
+  logic [ACC_DATA_WIDTH-1:0] acc[BANKS][U];
+  logic [U-1:0] wr_mask[BANKS];  // per bank: slots a counted product reached this set
+  logic [BW-1:0] cur;  // bank the next product joins
+  logic [BW-1:0] rd_bank;  // the oldest unreleased bank, the reader's: every PE keeps its own copy, so the array's select fans out nowhere
+  logic [SW-1:0] slot;  // partial sum within it
+  logic [CW-1:0] n_prod;  // products of the pass seen, counted or not
+  logic [CW-1:0] u_cnt;  // counted products of the pass
+  logic [BANKS-1:0] taken;  // all K products of the bank issued, not yet released
+  // The addend, read a cycle ahead: the registered bank and slot after this edge, the write-back bypass.
+  logic [ACC_DATA_WIDTH-1:0] add_a;
+  logic [BW-1:0] cur_n;  // the registered bank and slot after this edge
+  logic [SW-1:0] slot_n;
+  logic [CW-1:0] u_cnt_n;
+  logic          fresh_n;  // prod_fresh next cycle
+  logic          wb_hit;  // the write-back this cycle is the slot read
+  // Where each add in flight writes back, and whether a bank has an add issuing or in flight.
+  logic [BW-1:0] bank_dly[ADD_LAT];
+  logic [SW-1:0] slot_dly[ADD_LAT];
+  logic          v_dly   [ADD_LAT];
+  logic [BANKS-1:0] pending;
+
 `ifndef SYNTHESIS  // parameter checks; synthesis tools ignore or reject initial blocks
   initial if (U != ((K < S) ? K : S)) $error("ProcessingElement: U=%0d must be min(K=%0d, %0d); fewer slots reuse one before its add lands", U, K, S);
   initial if (COL >= K) $error("ProcessingElement: COL=%0d must be below K=%0d", COL, K);
@@ -61,16 +94,12 @@ module ProcessingElement #(
   end
 
   // The input's place in its pass, and whether it lies in this PE's block (always, unpacked).
-  logic [CW-1:0] k_in;
-  logic in_blk;
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) k_in <= '0;
     else if (v_i) k_in <= (k_in == CW'(K - 1)) ? '0 : k_in + 1'b1;
   assign in_blk = (pack_i == '0) || (((int'(k_in) ^ COL) >> (LGK - int'(pack_i))) == 0);
 
-  // The pass flags, delayed to meet their product out of the multiplier; v_d ticks for every product, counted or not.
-  logic fresh_d[MUL_LAT], more_d[MUL_LAT], v_d[MUL_LAT], inb_d[MUL_LAT];
-  logic [2:0] pack_d[MUL_LAT];
+  // The pass flags, delayed to meet their product out of the multiplier.
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
       for (int i = 0; i < MUL_LAT; i++) begin
@@ -95,38 +124,15 @@ module ProcessingElement #(
       end
     end
   end
-  logic prod_fresh, prod_more, prod_tick;
-  logic [2:0] prod_pack;
   assign prod_fresh = fresh_d[MUL_LAT-1];
   assign prod_more  = more_d[MUL_LAT-1];
   assign prod_tick  = v_d[MUL_LAT-1];
   assign prod_pack  = pack_d[MUL_LAT-1];
 
-  logic [ACC_DATA_WIDTH-1:0] prod, sum;
-  logic prod_v, sum_v;  // prod_v: a counted product, only those reach the multiplier
-
-  logic [ACC_DATA_WIDTH-1:0] acc[BANKS][U];
-  logic [U-1:0] wr_mask[BANKS];  // per bank: slots a counted product reached this set
-  logic [BW-1:0] cur;  // bank the next product joins
-  logic [BW-1:0] rd_bank;  // the oldest unreleased bank, the reader's: every PE keeps its own copy, so the array's select fans out nowhere
-  logic [SW-1:0] slot;  // partial sum within it
-  logic [CW-1:0] n_prod;  // products of the pass seen, counted or not
-  logic [CW-1:0] u_cnt;  // counted products of the pass
-  logic [BANKS-1:0] taken;  // all K products of the bank issued, not yet released
-
   // The first counted product into a slot of a new set is added to zero, so a reused bank needs no clear; later passes add on.
   // The addend is read a cycle ahead into add_a (timing: the bank and slot select stay out of the adder's first stage): from the bank and
   // slot the next product joins, with this cycle's write-back passed through when it lands on that slot, and the zero where the next
   // product is a new set's first into its slot.
-  logic [ACC_DATA_WIDTH-1:0] add_a;
-  logic [BW-1:0] cur_n;  // the registered bank and slot after this edge
-  logic [SW-1:0] slot_n;
-  logic [CW-1:0] u_cnt_n;
-  logic          fresh_n;  // prod_fresh next cycle
-  logic          wb_hit;  // the write-back this cycle is the slot read
-  logic [BW-1:0] bank_dly[ADD_LAT];  // the write-back bank, slot and valid of each add in flight; read by the bypass below
-  logic [SW-1:0] slot_dly[ADD_LAT];
-  logic          v_dly   [ADD_LAT];
   always_comb begin
     cur_n   = cur;
     slot_n  = prod_v ? ((slot == SW'(U - 1)) ? '0 : slot + 1'b1) : slot;
@@ -171,7 +177,6 @@ module ProcessingElement #(
     end
   end
 
-  logic [BANKS-1:0] pending;  // an add into the bank is issuing or in flight
   always_comb begin
     pending = '0;
     if (prod_v) pending[cur] = 1'b1;
@@ -223,6 +228,8 @@ module ProcessingElement #(
   always_comb for (int u = 0; u < U; u++) partial_o[u] = wr_mask[rd_bank][u] ? acc[rd_bank][u] : '0;
 
 `ifndef SYNTHESIS
+  // An add must not read a slot whose earlier add is in flight (the one at ADD_LAT-1 writes back this cycle, after the read).
+  logic slot_in_flight;
   a_bank_free: assert property (@(posedge clk_i) disable iff (!rstn_i) (prod_tick && n_prod == '0) |-> !taken[cur])
     else $error("ProcessingElement: a set started in bank %0d before the reader released it", cur);
   a_flags_aligned: assert property (@(posedge clk_i) disable iff (!rstn_i) prod_v == (v_d[MUL_LAT-1] && inb_d[MUL_LAT-1]))
@@ -237,8 +244,6 @@ module ProcessingElement #(
                                  (prod_tick && n_prod == CW'(K - 1)) |-> (int'(u_cnt) + int'(prod_v)) == (K >> int'(prod_pack)))
     else $error("ProcessingElement: a pass counted %0d products, its block holds %0d", int'(u_cnt) + int'(prod_v),
                 K >> int'(prod_pack));
-  // An add must not read a slot whose earlier add is in flight (the one at ADD_LAT-1 writes back this cycle, after the read).
-  logic slot_in_flight;
   always_comb begin
     slot_in_flight = 1'b0;
     for (int i = 0; i < ADD_LAT; i++) if (v_dly[i] && bank_dly[i] == cur && slot_dly[i] == slot) slot_in_flight = 1'b1;
