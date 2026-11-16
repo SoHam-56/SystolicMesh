@@ -134,6 +134,8 @@ module SystolicMesh #(
   logic arrays_busy;
   logic reducers_ready, reducers_busy, reducers_read_done, reducers_written;
   logic commit_q, commit_fresh_q, commit_more_q, set_launch, reduce_start;
+  logic reduce_start_q;  // the reducers start a cycle after the decision: their bias copy's enable fans out to N x 32 flops each (1.52 ns at N 64)
+  logic [RBW-1:0] out_wr_q;  // the result bank of that decision, held for them (out_wr has moved on by then)
   logic [2:0] commit_pack_q;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0] load_we_A, load_we_B;
   logic [TILES_PER_DIM-1:0][TILES_PER_DIM-1:0][LW-1:0][DATA_WIDTH-1:0] load_data_A, load_data_B;
@@ -329,8 +331,13 @@ module SystolicMesh #(
     assign out_full[b] = (out_state[b] == R_FULL);
   end
   // Idle reducers take the oldest final set; reducers reading their last pixel take the next one, as the oldest is released.
-  assign reduce_start = reducers_ready && (out_state[out_wr] == R_FREE) &&
-                        (reducers_read_done ? arrays_next_final : arrays_final);
+  assign reduce_start = reducers_ready && !reduce_start_q && (out_state[out_wr] == R_FREE) &&
+                        (reducers_read_done ? arrays_next_final : arrays_final);  // not while the last decision is still reaching the reducers
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) reduce_start_q <= 1'b0;
+    else reduce_start_q <= reduce_start;
+  always_ff @(posedge clk_i)  // no reset: read only with reduce_start_q
+    if (reduce_start) out_wr_q <= out_wr;
   assign set_done     = reducers_written;
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
@@ -378,7 +385,7 @@ module SystolicMesh #(
         bias_pk[bq_wr] <= stg_pack != 3'd0;
         bq_wr <= bq_wr + 1'b1;
       end
-      if (reduce_start) bq_rd <= bq_rd + 1'b1;
+      if (reduce_start_q) bq_rd <= bq_rd + 1'b1;  // the reducers copy bias_q[bq_rd] as they start, a cycle after the decision
       bq_n <= bq_n + (bias_push ? 1'b1 : 1'b0) - (reduce_start ? 1'b1 : 1'b0);
     end
   end
@@ -536,8 +543,8 @@ module SystolicMesh #(
         ) acc_unit (
             .clk_i       (clk_i),
             .rstn_i      (rstn_i),
-            .start_i     (reduce_start),
-            .out_bank_i  (out_wr),
+            .start_i     (reduce_start_q),
+            .out_bank_i  (out_wr_q),
             .tile_data_i ({t_bias[i][j], t_data[i][j]}),
             .bias_i      (red_bias[j*TILE_SIZE+:TILE_SIZE]),
             .rd_en_o     (t_ren[i][j]),

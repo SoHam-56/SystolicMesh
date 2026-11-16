@@ -56,12 +56,18 @@ module ProcessingElement #(
   logic [SW-1:0] slot;  // partial sum within it
   logic [CW-1:0] n_prod;  // products of the pass seen, counted or not
   logic [CW-1:0] u_cnt;  // counted products of the pass
+  // Kept beside the counters, so the addend's select below is muxes only (the compare and increments ahead of the 32:1 slot read were 1.06 ns at 45 nm).
+  logic n_last;  // n_prod == K - 1
+  logic [SW-1:0] slot_inc;  // slot + 1, wrapped
+  logic [BW-1:0] cur_inc;  // cur + 1, wrapped
+  logic u_lt, u1_lt;  // u_cnt < U, u_cnt + 1 < U
   logic [BANKS-1:0] taken;  // all K products of the bank issued, not yet released
   // The addend, read a cycle ahead: the registered bank and slot after this edge, the write-back bypass.
   logic [ACC_DATA_WIDTH-1:0] add_a;
   logic [BW-1:0] cur_n;  // the registered bank and slot after this edge
   logic [SW-1:0] slot_n;
-  logic [CW-1:0] u_cnt_n;
+  logic          zero_n;  // the next product is a new set's first into its slot: it adds to zero
+  logic          pass_end;  // this product ends the pass
   logic          fresh_n;  // prod_fresh next cycle
   logic          wb_hit;  // the write-back this cycle is the slot read
   // Where each add in flight writes back, and whether a bank has an add issuing or in flight.
@@ -134,22 +140,16 @@ module ProcessingElement #(
   // slot the next product joins, with this cycle's write-back passed through when it lands on that slot, and the zero where the next
   // product is a new set's first into its slot.
   always_comb begin
-    cur_n   = cur;
-    slot_n  = prod_v ? ((slot == SW'(U - 1)) ? '0 : slot + 1'b1) : slot;
-    u_cnt_n = prod_v ? u_cnt + 1'b1 : u_cnt;
-    if (prod_tick && n_prod == CW'(K - 1)) begin
-      u_cnt_n = '0;
-      if (!prod_more) begin
-        cur_n  = (cur == BW'(BANKS - 1)) ? '0 : cur + 1'b1;
-        slot_n = '0;
-      end
-    end
-    fresh_n = (MUL_LAT > 1) ? fresh_d[(MUL_LAT > 1) ? MUL_LAT - 2 : 0] : fresh_i;
-    wb_hit  = sum_v && (bank_dly[ADD_LAT-1] == cur_n) && (slot_dly[ADD_LAT-1] == slot_n);
+    pass_end = prod_tick && n_last;
+    cur_n    = (pass_end && !prod_more) ? cur_inc : cur;
+    slot_n   = (pass_end && !prod_more) ? '0 : (prod_v ? slot_inc : slot);
+    fresh_n  = (MUL_LAT > 1) ? fresh_d[(MUL_LAT > 1) ? MUL_LAT - 2 : 0] : fresh_i;
+    zero_n   = fresh_n && (pass_end || (prod_v ? u1_lt : u_lt));  // the counted products after this edge are below U
+    wb_hit   = sum_v && (bank_dly[ADD_LAT-1] == cur_n) && (slot_dly[ADD_LAT-1] == slot_n);
   end
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) add_a <= '0;
-    else add_a <= (fresh_n && u_cnt_n < CW'(U)) ? '0 : (wb_hit ? sum : acc[cur_n][slot_n]);
+    else add_a <= zero_n ? '0 : (wb_hit ? sum : acc[cur_n][slot_n]);
 
   // The product widened to the accumulator (bf16 exactly into fp32, int8 sign-extended into int32), then the accumulator add.
   fmt_mul #(.DATA_WIDTH(DATA_WIDTH), .EXT_DATA_WIDTH(ACC_DATA_WIDTH)) MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i && in_blk),
@@ -190,6 +190,11 @@ module ProcessingElement #(
       slot    <= '0;
       n_prod  <= '0;
       u_cnt   <= '0;
+      n_last   <= (K == 1);
+      slot_inc <= SW'((U > 1) ? 1 : 0);
+      cur_inc  <= BW'((BANKS > 1) ? 1 : 0);
+      u_lt     <= 1'b1;
+      u1_lt    <= (1 < U);
       taken   <= '0;
       final_o <= '0;
       for (int b = 0; b < BANKS; b++) begin
@@ -202,19 +207,30 @@ module ProcessingElement #(
       if (prod_tick && n_prod == '0 && prod_fresh) wr_mask[cur] <= prod_v ? (U'(1) << slot) : '0;
       else if (prod_v && prod_fresh && u_cnt < CW'(U)) wr_mask[cur][slot] <= 1'b1;
       if (prod_v) begin
-        slot  <= (slot == SW'(U - 1)) ? '0 : slot + 1'b1;
-        u_cnt <= u_cnt + 1'b1;
+        slot     <= slot_inc;
+        slot_inc <= (slot_inc == SW'(U - 1)) ? '0 : slot_inc + 1'b1;
+        u_cnt    <= u_cnt + 1'b1;
+        u_lt     <= u1_lt;
+        u1_lt    <= (int'(u_cnt) + 2 < U);
       end
       if (prod_tick) begin
-        if (n_prod == CW'(K - 1)) begin
+        if (n_last) begin
           n_prod <= '0;
+          n_last <= (K == 1);
           u_cnt  <= '0;
+          u_lt   <= 1'b1;
+          u1_lt  <= (1 < U);
           if (!prod_more) begin  // the set's last pass; a continuing set keeps its bank and the slot keeps turning
             taken[cur] <= 1'b1;
-            cur        <= (cur == BW'(BANKS - 1)) ? '0 : cur + 1'b1;
+            cur        <= cur_inc;
+            cur_inc    <= (cur_inc == BW'(BANKS - 1)) ? '0 : cur_inc + 1'b1;
             slot       <= '0;
+            slot_inc   <= SW'((U > 1) ? 1 : 0);
           end
-        end else n_prod <= n_prod + 1'b1;
+        end else begin
+          n_prod <= n_prod + 1'b1;
+          n_last <= (int'(n_prod) + 1 == K - 1);
+        end
       end
       for (int b = 0; b < BANKS; b++) if (taken[b] && !pending[b]) final_o[b] <= 1'b1;
       if (release_i) begin
