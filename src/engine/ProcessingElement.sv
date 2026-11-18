@@ -158,7 +158,7 @@ module ProcessingElement #(
   // The product widened to the accumulator (bf16 exactly into fp32, int8 sign-extended into int32), then the accumulator add.
   fmt_mul #(.DATA_WIDTH(DATA_WIDTH), .EXT_DATA_WIDTH(ACC_DATA_WIDTH)) MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i && in_blk),
       .a_i(a_i), .b_i(b_i), .product_o(prod), .done_o(prod_v));  // prod is X before its first done_o; read with prod_v
-  fmt_add #(.DATA_WIDTH(ACC_DATA_WIDTH)) ADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(prod_v), .a_i(add_a), .b_i(prod), .sum_o(sum),
+  fmt_add #(.DATA_WIDTH(ACC_DATA_WIDTH), .CARRY_SELECT(1'b1)) ADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(prod_v), .a_i(add_a), .b_i(prod), .sum_o(sum),
       .done_o(sum_v));
 
   // Where each add in flight writes back, and whether it is still in flight.
