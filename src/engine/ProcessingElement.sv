@@ -64,12 +64,13 @@ module ProcessingElement #(
   logic [BANKS-1:0] taken;  // all K products of the bank issued, not yet released
   // The addend, read a cycle ahead: the registered bank and slot after this edge, the write-back bypass.
   logic [ACC_DATA_WIDTH-1:0] add_a;
-  logic [BW-1:0] cur_n;  // the registered bank and slot after this edge
-  logic [SW-1:0] slot_n;
+  logic          set_end;  // this product ends its set's last pass: the next product starts bank cur_inc at slot 0
+  logic [SW-1:0] slot_y;  // the slot after this edge when the set goes on
+  logic [ACC_DATA_WIDTH-1:0] rd_x, rd_y;  // the addend read for each case, chosen by set_end last (pass_end into the bank and slot select was 1.09 ns)
+  logic          wb_x, wb_y;  // the write-back this cycle lands on that case's slot
   logic          zero_n;  // the next product is a new set's first into its slot: it adds to zero
   logic          pass_end;  // this product ends the pass
   logic          fresh_n;  // prod_fresh next cycle
-  logic          wb_hit;  // the write-back this cycle is the slot read
   // Where each add in flight writes back, and whether a bank has an add issuing or in flight.
   logic [BW-1:0] bank_dly[ADD_LAT];
   logic [SW-1:0] slot_dly[ADD_LAT];
@@ -141,15 +142,18 @@ module ProcessingElement #(
   // product is a new set's first into its slot.
   always_comb begin
     pass_end = prod_tick && n_last;
-    cur_n    = (pass_end && !prod_more) ? cur_inc : cur;
-    slot_n   = (pass_end && !prod_more) ? '0 : (prod_v ? slot_inc : slot);
+    set_end  = pass_end && !prod_more;
+    slot_y   = prod_v ? slot_inc : slot;
+    rd_x     = acc[cur_inc][0];
+    rd_y     = acc[cur][slot_y];
     fresh_n  = (MUL_LAT > 1) ? fresh_d[(MUL_LAT > 1) ? MUL_LAT - 2 : 0] : fresh_i;
     zero_n   = fresh_n && (pass_end || (prod_v ? u1_lt : u_lt));  // the counted products after this edge are below U
-    wb_hit   = sum_v && (bank_dly[ADD_LAT-1] == cur_n) && (slot_dly[ADD_LAT-1] == slot_n);
+    wb_x     = sum_v && (bank_dly[ADD_LAT-1] == cur_inc) && (slot_dly[ADD_LAT-1] == '0);
+    wb_y     = sum_v && (bank_dly[ADD_LAT-1] == cur) && (slot_dly[ADD_LAT-1] == slot_y);
   end
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) add_a <= '0;
-    else add_a <= zero_n ? '0 : (wb_hit ? sum : acc[cur_n][slot_n]);
+    else add_a <= zero_n ? '0 : (set_end ? (wb_x ? sum : rd_x) : (wb_y ? sum : rd_y));
 
   // The product widened to the accumulator (bf16 exactly into fp32, int8 sign-extended into int32), then the accumulator add.
   fmt_mul #(.DATA_WIDTH(DATA_WIDTH), .EXT_DATA_WIDTH(ACC_DATA_WIDTH)) MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i && in_blk),
