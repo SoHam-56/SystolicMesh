@@ -35,7 +35,8 @@ module AccumulationUnit #(
   localparam int RESULT_DATA_WIDTH = sienna_fmt_pkg::RESULT_DATA_WIDTH;
   localparam int ADD_LAT = sienna_fmt_pkg::add_latency(ACC_DATA_WIDTH);  // fmt_add: valid_i at t, done_o at t+ADD_LAT
   localparam int LEVELS = $clog2(P);  // adder levels; 0 when there is one partial
-  localparam int LAT = 1 + LEVELS * ADD_LAT;  // read issue to tree output
+  localparam int RD_LAT = (PIXELS >= 256) ? 2 : 1;  // the arrays' read: one cycle, or two from 256 pixels (SystolicArray's RD_LAT, the same rule)
+  localparam int LAT = RD_LAT + LEVELS * ADD_LAT;  // read issue to tree output
   localparam int BANK_OFFSET = MATRIX_WIDTH * MATRIX_WIDTH;
 
   // Entries at tree level l: level 0 holds the P partials.
@@ -58,6 +59,7 @@ module AccumulationUnit #(
   logic [PW-1:0] w_idx;
   logic [RBW-1:0] w_bank;
   logic in_tree;
+  logic [ACC_DATA_WIDTH-1:0] bias_word_d;  // RD_LAT 2: the bias word a cycle earlier, so it meets its pixel's partials
 
   assign ready_o   = !reading || read_done_o;  // the next set may start as the last pixel is read
   assign rd_en_o   = reading;
@@ -82,8 +84,11 @@ module AccumulationUnit #(
 
   // The bias word joins the tree with the pixel's partials, which arrive one cycle after the read.
   always_ff @(posedge clk_i or negedge rstn_i) begin
-    if (!rstn_i) bias_word_o <= '0;
-    else bias_word_o <= rd_bias[int'(rd_idx) % N];
+    if (!rstn_i) {bias_word_o, bias_word_d} <= '0;
+    else begin
+      bias_word_d <= rd_bias[int'(rd_idx) % N];
+      bias_word_o <= (RD_LAT == 2) ? bias_word_d : rd_bias[int'(rd_idx) % N];
+    end
   end
 
   // Pixel index and result bank travel beside the data, LAT cycles from read to write.
@@ -106,8 +111,8 @@ module AccumulationUnit #(
     end
   end
 
-  // A read issued at cycle t presents its data at t+1, so level 0 is valid one cycle behind.
-  assign lvl_v[0] = tag_v[0];
+  // A read issued at cycle t presents its data at t+RD_LAT, so level 0 is valid RD_LAT cycles behind.
+  assign lvl_v[0] = tag_v[RD_LAT-1];
   for (genvar k = 0; k < P; k++) begin : L0
     assign lvl_d[0][k] = tile_data_i[k];
   end

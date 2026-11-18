@@ -28,7 +28,7 @@ module SystolicArray #(
     output logic                               next_final_o,   // so is the one after it, for a reader about to release
     input  logic                               read_enable_i,
     input  logic [          $clog2(N*N)-1:0]   read_addr_i,
-    output logic [U-1:0][sienna_fmt_pkg::ACC_DATA_WIDTH-1:0] read_data_o,    // the pixel's U partial sums, one cycle later
+    output logic [U-1:0][sienna_fmt_pkg::ACC_DATA_WIDTH-1:0] read_data_o,    // the pixel's U partial sums, RD_LAT cycles later (1, or 2 from 256 pixels)
     output logic                               read_valid_o,
     input  logic                               release_i,      // the reader is done with the oldest final set
     output logic                               busy_o          // a set is loaded, feeding or unread
@@ -37,6 +37,9 @@ module SystolicArray #(
   localparam int ACC_DATA_WIDTH = sienna_fmt_pkg::ACC_DATA_WIDTH;  // partial sums
   localparam int AD = N * K;  // A and B each hold N*K words per bank
   localparam int BW = (BANKS > 1) ? $clog2(BANKS) : 1;
+  localparam int RD_LAT = (N * N >= 256) ? 2 : 1;  // the read: one cycle, or two from 256 pixels (AccumulationUnit's RD_LAT, the same rule)
+  localparam int RPW = $clog2(N * N);  // a pixel address
+  localparam int QW = (N * N) / 4;  // RD_LAT 2: pixels per quarter, each selected into its own register
   localparam int KW = (K > 1) ? $clog2(K) : 1;
   localparam int OB_AW = $clog2(2 * AD);  // the operand banks' word address
   // A continuing pass reads the slots its set's previous pass wrote: with K < S a PE reuses each slot every pass, so the pass waits S cycles.
@@ -83,6 +86,9 @@ module SystolicArray #(
   logic v_w[N][N+1], f_w[N][N+1], m_w[N][N+1];  // valid and pass flags travel east with A
   logic [2:0] p_w[N][N+1];  // pack shift travels east with A
   logic [U-1:0][ACC_DATA_WIDTH-1:0] part[N][N];
+  logic [U-1:0][ACC_DATA_WIDTH-1:0] rd_q[4];  // RD_LAT 2: the read's first stage, one word per quarter of the pixels (the 256:1 select in one
+  logic [1:0]                       rd_qsel;  // cycle was the T16 meshes' 1.054-1.104 ns, acc_unit rd_idx -> tile read_data_o); its quarter
+  logic                             rd_q_v;
   logic [BANKS-1:0] pe_final[N*N];
   // The reader's bank, and per bank, registered, whether its set is final in every PE.
   logic [BW-1:0] rb;  // oldest unread accumulator bank
@@ -289,8 +295,34 @@ module SystolicArray #(
         bank_final[rb] <= 1'b0;
         rb <= (rb == BW'(BANKS - 1)) ? '0 : rb + 1'b1;
       end
-      read_valid_o <= read_enable_i;
-      if (read_enable_i) read_data_o <= part[read_addr_i/N][read_addr_i%N];
+      if (RD_LAT == 1) begin
+        read_valid_o <= read_enable_i;
+        if (read_enable_i) read_data_o <= part[read_addr_i/N][read_addr_i%N];
+      end else begin
+        read_valid_o <= rd_q_v;
+        if (rd_q_v) read_data_o <= rd_q[rd_qsel];
+      end
+    end
+  end
+  // RD_LAT 2: the first stage selects within each quarter (a 64:1 select at 256 pixels), the second picks the quarter.
+  if (RD_LAT == 2) begin : G_READ2
+    always_ff @(posedge clk_i or negedge rstn_i)
+      if (!rstn_i) rd_q_v <= 1'b0;
+      else rd_q_v <= read_enable_i;
+    always_ff @(posedge clk_i)
+      if (read_enable_i) begin
+        rd_qsel <= read_addr_i[RPW-1-:2];
+        for (int q = 0; q < 4; q++) rd_q[q] <= part[(q * QW + int'(read_addr_i[RPW-3:0])) / N][(q * QW + int'(read_addr_i[RPW-3:0])) % N];
+      end
+  end else begin : G_READ1
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic unused_rd;
+    assign unused_rd = ^{rd_q[0], rd_q[1], rd_q[2], rd_q[3], rd_qsel, rd_q_v};
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign rd_q_v  = 1'b0;
+    assign rd_qsel = '0;
+    for (genvar q = 0; q < 4; q++) begin : G_Q
+      assign rd_q[q] = '0;
     end
   end
 
