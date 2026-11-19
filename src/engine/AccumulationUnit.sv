@@ -123,7 +123,7 @@ module AccumulationUnit #(
     logic [NXT_W-1:0] done_bits;
     for (genvar m = 0; m < NXT_W; m++) begin : NODE
       if (2 * m + 1 < IN_W) begin : ADD
-        fmt_add #(.DATA_WIDTH(ACC_DATA_WIDTH)) adder (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(lvl_v[l]), .a_i(lvl_d[l][2*m]),
+        fmt_add #(.DATA_WIDTH(ACC_DATA_WIDTH), .CARRY_SELECT(1'b1)) adder (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(lvl_v[l]), .a_i(lvl_d[l][2*m]),
             .b_i(lvl_d[l][2*m+1]), .sum_o(lvl_d[l+1][m]), .done_o(done_bits[m]));  // the accumulator add: fp32 in floats, int32 in int8
       end else begin : PASS
         // An odd entry out: delay it by the adder latency so it stays aligned with its level.
