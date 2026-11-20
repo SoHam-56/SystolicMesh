@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Hierarchy check: at each define and mesh mode the AriL units elaborated under SystolicMesh are exactly that precision's; args: --files DESIGN_FILES."""
 import argparse
+import json
 import os
-import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -20,29 +20,66 @@ EXPECTED = {  # the mesh's units per precision: product into the accumulator, th
 EXPECTED["default"] = EXPECTED["fp32"]  # no define elaborates fp32
 
 
-def units_by_place(xml: str) -> tuple:
-    """(origNames of the cells under the mesh instance dut, origNames of every other cell) from the XML's cell hierarchy."""
-    orig = {m.group(1): m.group(2) for m in re.finditer(r'<module\b[^>]*\bname="([^"]+)"[^>]*\borigName="([^"]+)"', xml)}
+def hier_cells(tree: dict, top: str) -> list:
+    """Every instance below the top module as (hierarchical name, origName of the module it instantiates), from Verilator's --json-only
+    tree: a MODULE holds its CELLs, inside any named generate block (GENBLOCK), and a CELL's modp names the MODULE it instantiates."""
+    modules = {m["addr"]: m for m in tree["modulesp"] if m.get("type") == "MODULE"}
+
+    def cells(node, path):  # the CELLs in a module's body with their generate-block path, not descending into another module
+        if isinstance(node, dict):
+            t = node.get("type")
+            if t == "CELL":
+                yield node, path
+                return
+            if t == "GENBLOCK" and node.get("name"):
+                path = f"{path}.{node['name']}"
+            for v in node.values():
+                if isinstance(v, (list, dict)):
+                    yield from cells(v, path)
+        elif isinstance(node, list):
+            for v in node:
+                yield from cells(v, path)
+
+    root = next((m for m in modules.values() if m.get("origName") == top), None)
+    if root is None:
+        raise RuntimeError(f"no {top} module in the JSON")
+    out, stack = [], [(root, top)]
+    while stack:
+        mod, path = stack.pop()
+        for body in (v for k, v in mod.items() if isinstance(v, (list, dict))):
+            for c, p in cells(body, path):
+                child = modules.get(c.get("modp"))
+                if child is None:
+                    continue
+                h = f"{p}.{c['origName']}"
+                out.append((h, child.get("origName", child["name"])))
+                stack.append((child, h))
+    return out
+
+
+def units_by_place(tree: dict) -> tuple:
+    """(origNames of the modules instantiated under the mesh instance dut, origNames of every other one)."""
     under, other = set(), set()
-    for m in re.finditer(r'<cell\b[^>]*\bsubmodname="([^"]+)"[^>]*\bhier="([^"]+)"', xml):
-        (under if m.group(2).startswith("TB_SystolicMesh.dut.") else other).add(orig.get(m.group(1), m.group(1)))
+    for h, u in hier_cells(tree, "TB_SystolicMesh"):
+        (under if h.startswith("TB_SystolicMesh.dut.") else other).add(u)
     if not under:
-        raise RuntimeError("no cell under TB_SystolicMesh.dut in the XML")
+        raise RuntimeError("no cell under TB_SystolicMesh.dut in the JSON")
     return under, other
 
 
-def elaborate(fmt: str, ck: int, files: list, verilator: str, out: str) -> str:
+def elaborate(fmt: str, ck: int, files: list, verilator: str, out: str) -> dict:
     d = [] if fmt == "default" else [f"+define+FMT_{fmt.upper()}"]
-    x = os.path.join(out, f"hier_{fmt}_ck{ck}.xml")
+    x = os.path.join(out, f"hier_{fmt}_ck{ck}.json")
     # the bench is the top: Verilator cannot elaborate a top with interface ports, and the bench instantiates only the mesh's units
-    cmd = [verilator, "--xml-only", "--xml-output", x, "--timing", "-Wno-fatal", "-Wno-lint", "-Wno-style", *d, "--top-module", "TB_SystolicMesh",
+    cmd = [verilator, "--json-only", "--json-only-output", x, "--json-only-meta-output", x[:-5] + ".meta.json", "--timing", "-Wno-fatal", "-Wno-lint", "-Wno-style", *d, "--top-module", "TB_SystolicMesh",
            "-GMATRIX_SIZE=8", "-GTILE_SIZE=2", f"-GCOLLAPSE_K={ck}", "--Mdir", os.path.join(out, f"obj_{fmt}_ck{ck}"), *files,
            os.path.join(ROOT, "testbenches", "top", "TB_SystolicMesh.sv")]
     r = subprocess.run(cmd, cwd=os.path.join(ROOT, "src"), capture_output=True, text=True)
     if r.returncode != 0:
         errs = [ln for ln in (r.stdout + r.stderr).splitlines() if ln.startswith("%Error")]
         raise RuntimeError(f"{fmt} ck{ck}: verilator exit {r.returncode}: {' | '.join(errs[:3]) or (r.stdout + r.stderr)[-400:]}")
-    return open(x).read()
+    with open(x) as fh:
+        return json.load(fh)
 
 
 def judge(fmt: str, units: set) -> tuple:
@@ -59,8 +96,8 @@ def main() -> int:
     os.makedirs(a.out, exist_ok=True)
     jobs = [(f, ck) for f in ("fp32", "bf16", "int8", "default") for ck in (1, 0)]
     with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as ex:  # one elaboration per core
-        xmls = dict(zip(jobs, ex.map(lambda j: elaborate(*j, a.files, a.verilator, a.out), jobs)))
-    places = {j: units_by_place(x) for j, x in xmls.items()}
+        trees = dict(zip(jobs, ex.map(lambda j: elaborate(*j, a.files, a.verilator, a.out), jobs)))
+    places = {j: units_by_place(x) for j, x in trees.items()}
     found = {j: p[0] for j, p in places.items()}
     outside = {j: p[1] & UNITS for j, p in places.items()}
     bad = 0
