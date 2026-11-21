@@ -31,7 +31,7 @@ module ProcessingElement #(
   localparam int DATA_WIDTH = sienna_fmt_pkg::DATA_WIDTH;  // operands
   localparam int ACC_DATA_WIDTH = sienna_fmt_pkg::ACC_DATA_WIDTH;  // products and sums
   localparam int ADD_LAT = sienna_fmt_pkg::add_latency(ACC_DATA_WIDTH);  // fmt_add: valid_i at t, done_o at t+ADD_LAT
-  localparam int MUL_LAT = sienna_fmt_pkg::mul_latency(DATA_WIDTH, ACC_DATA_WIDTH);  // fmt_mul: valid_i at t, done_o at t+MUL_LAT
+  localparam int MUL_LAT = sienna_fmt_pkg::MUL_LATENCY;  // fmt_mul MESH: valid_i at t, done_o at t+MUL_LAT (the mesh product's latency)
   localparam int S = ADD_LAT + 1;  // a slot is read again S cycles after its add issues, one after the write-back
   localparam int SW = (U > 1) ? $clog2(U) : 1;
   localparam int CW = $clog2(K + 1);
@@ -156,7 +156,7 @@ module ProcessingElement #(
     else add_a <= zero_n ? '0 : (set_end ? (wb_x ? sum : rd_x) : (wb_y ? sum : rd_y));
 
   // The product widened to the accumulator (bf16 exactly into fp32, int8 sign-extended into int32), then the accumulator add.
-  fmt_mul #(.DATA_WIDTH(DATA_WIDTH), .EXT_DATA_WIDTH(ACC_DATA_WIDTH)) MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i && in_blk),
+  fmt_mul #(.DATA_WIDTH(DATA_WIDTH), .EXT_DATA_WIDTH(ACC_DATA_WIDTH), .MESH(1'b1)) MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i && in_blk),
       .a_i(a_i), .b_i(b_i), .product_o(prod), .done_o(prod_v));  // prod is X before its first done_o; read with prod_v
   fmt_add #(.DATA_WIDTH(ACC_DATA_WIDTH), .CARRY_SELECT(1'b1)) ADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(prod_v), .a_i(add_a), .b_i(prod), .sum_o(sum),
       .done_o(sum_v));
