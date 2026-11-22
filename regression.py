@@ -143,8 +143,13 @@ def _run_checks() -> list:
 # ---------------------------------------------------------------------------
 
 
+# xsim's $error is "Error: <message>" with no quote; its two known false firings (sim_differences D6/D10, the bank-final assertions) are left out
+XSIM_FALSE = r"SystolicArray: read or release with no final set|ProcessingElement: bank \d+ released before its set was final"
+
+
 def _parse(raw: str, test: str = "-") -> dict:
-    if "Assertion failed" in raw or re.search(r'^(?:Error|Fatal): "|: started at .* failed at', raw, re.M):  # a firing assertion (Verilator's or VCS's words) leaves the exit code and counts untouched
+    if "Assertion failed" in raw or re.search(r'^(?:Error|Fatal): "|: started at .* failed at|^(?:Error|Fatal): (?!"|' + XSIM_FALSE + ')', raw, re.M) \
+            or "SIMFAIL" in raw:  # a firing assertion (Verilator's, VCS's or xsim's words) leaves the counts untouched; SIMFAIL: the simulator exited non-zero
         return dict(status="ASSERT", passed=0, failed=0, elements=0, tol=0, fail_els=0, avg_cyc=0)
     if "BUILDFAIL" in raw or "version `GLIBC" in raw or "%Error" in raw:
         return dict(status="NO-RUN", passed=0, failed=0, elements=0, tol=0,
