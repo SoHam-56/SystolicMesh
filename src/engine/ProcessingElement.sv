@@ -261,7 +261,22 @@ module ProcessingElement #(
     end
   end
 
-  always_comb for (int u = 0; u < U; u++) partial_o[u] = wr_mask[rd_bank][u] ? acc[rd_bank][u] : '0;
+  // The reader's bank's sums as a register, loaded from the bank rd_bank holds after this edge (the next one on a release): a bank is read
+  // only when final, two edges after its last write, so the register holds its sums by then (a_partial_q); rd_bank -> the bank select ->
+  // the tile's read stage was the T16 meshes' second limit at 0.8.
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) partial_o <= '0;
+    else begin
+      automatic logic [BW-1:0] rb_n;
+      rb_n = !release_i ? rd_bank : (rd_bank == BW'(BANKS - 1)) ? '0 : rd_bank + 1'b1;
+      for (int u = 0; u < U; u++) partial_o[u] <= wr_mask[rb_n][u] ? acc[rb_n][u] : '0;
+    end
+`ifndef SYNTHESIS
+  logic [U-1:0][ACC_DATA_WIDTH-1:0] partial_ref;
+  always_comb for (int u = 0; u < U; u++) partial_ref[u] = wr_mask[rd_bank][u] ? acc[rd_bank][u] : '0;
+  a_partial_q: assert property (@(posedge clk_i) disable iff (!rstn_i) final_o[rd_bank] |-> partial_o == partial_ref)
+    else $error("ProcessingElement: a_partial_q: the registered sums of final bank %0d are not its sums", rd_bank);
+`endif
 
 `ifndef SYNTHESIS
   // An add must not read a slot whose earlier add is in flight (the one at ADD_LAT-1 writes back this cycle, after the read).
