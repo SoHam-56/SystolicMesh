@@ -48,7 +48,8 @@ module AccumulationUnit #(
   logic reading;
   logic [PW-1:0] rd_idx;
   logic [RBW-1:0] rd_bank;
-  logic [N-1:0][ACC_DATA_WIDTH-1:0] rd_bias;
+  logic [N-1:0][ACC_DATA_WIDTH-1:0] rd_bias;  // the set's biases, rotated a word per read: rd_bias[0] is the pixel's (rd_bias[rd_idx % N] was
+                                             // an N:1 word select on a stepping counter, the int8 N16 T2 mesh's 0.869 ns at 0.8)
   // Pixel index and result bank travel beside the data, LAT cycles from read to write.
   logic          tag_v   [LAT];
   logic [PW-1:0] tag_idx [LAT];
@@ -80,6 +81,7 @@ module AccumulationUnit #(
     end else if (reading) begin
       if (rd_idx == PW'(PIXELS - 1)) reading <= 1'b0;
       else rd_idx <= rd_idx + 1'b1;
+      rd_bias <= {rd_bias[0], rd_bias[N-1:1]};  // the next pixel's bias into slot 0
     end
   end
 
@@ -89,11 +91,18 @@ module AccumulationUnit #(
       bias_word_o <= '0;
       for (int s = 0; s < BD; s++) bias_word_d[s] <= '0;
     end else begin
-      bias_word_d[0] <= rd_bias[int'(rd_idx) % N];
+      bias_word_d[0] <= rd_bias[0];
       for (int s = 1; s < BD; s++) bias_word_d[s] <= bias_word_d[s-1];
-      bias_word_o <= (RD_LAT > 1) ? bias_word_d[BD-1] : rd_bias[int'(rd_idx) % N];
+      bias_word_o <= (RD_LAT > 1) ? bias_word_d[BD-1] : rd_bias[0];
     end
   end
+`ifndef SYNTHESIS
+  // The rotated word is the select it replaced on every reading cycle (idle cycles' bias words are not read).
+  logic [N-1:0][ACC_DATA_WIDTH-1:0] rd_bias_ref;
+  always_ff @(posedge clk_i) if (start_i && ready_o) rd_bias_ref <= bias_i;
+  a_bias_rot: assert property (@(posedge clk_i) disable iff (!rstn_i) reading |-> rd_bias[0] == rd_bias_ref[int'(rd_idx) % N])
+    else $error("AccumulationUnit: a_bias_rot: the rotated bias %h is not the pixel %0d's %h", rd_bias[0], rd_idx, rd_bias_ref[int'(rd_idx) % N]);
+`endif
 
   // Pixel index and result bank travel beside the data, LAT cycles from read to write.
   always_ff @(posedge clk_i or negedge rstn_i) begin
