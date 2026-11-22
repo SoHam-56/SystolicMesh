@@ -311,6 +311,22 @@ module SystolicArray #(
   // RD_LAT > 1: stage 0 selects within each group of 64 pixels on the address' low 6 bits, each later stage within groups of 64 of the
   // stage before on the next 6, and read_data_o picks among the last stage's words (at 256 pixels: four groups, then the quarter).
   if (RD_LAT > 1) begin : G_TREE
+    // The read address as this tile's own register: the reducer reads 0 .. N*N - 1 in order, back to back or after a pause from 0, so a
+    // counter here equals read_addr_i on every read (a_rd_loc) and the stage-0 selects fan out from inside the tile (the reducer's rd_idx
+    // into every group register of the tiles it reads was the T16 meshes' 0.99-1.01 ns at 0.8).
+    logic [RPW-1:0] rd_loc;
+    always_ff @(posedge clk_i or negedge rstn_i)
+      if (!rstn_i) rd_loc <= '0;
+      else rd_loc <= read_enable_i ? rd_loc + 1'b1 : '0;
+`ifndef SYNTHESIS
+    a_rd_loc: assert property (@(posedge clk_i) disable iff (!rstn_i) read_enable_i |-> rd_loc == read_addr_i)
+      else $error("SystolicArray: a_rd_loc: the local read address %0d is not read_addr_i %0d", rd_loc, read_addr_i);
+`else
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic unused_addr;
+    assign unused_addr = ^read_addr_i;  // the tile counts the address itself; only the check reads the port
+    /* verilator lint_on UNUSEDSIGNAL */
+`endif
     always_ff @(posedge clk_i or negedge rstn_i)
       if (!rstn_i) for (int k = 0; k <= LS; k++) rd_sv[k] <= 1'b0;
       else begin
@@ -319,8 +335,8 @@ module SystolicArray #(
       end
     always_ff @(posedge clk_i) begin  // no reset: used only with its stage's valid
       if (read_enable_i) begin
-        rd_sa[0] <= read_addr_i;
-        for (int j = 0; j < RG; j++) rd_st[0][j] <= part[(j * 64 + (int'(read_addr_i) % 64)) / N][(j * 64 + (int'(read_addr_i) % 64)) % N];
+        rd_sa[0] <= rd_loc;
+        for (int j = 0; j < RG; j++) rd_st[0][j] <= part[(j * 64 + (int'(rd_loc) % 64)) / N][(j * 64 + (int'(rd_loc) % 64)) % N];
       end
       for (int k = 1; k <= LS; k++)
         if (rd_sv[k-1]) begin
