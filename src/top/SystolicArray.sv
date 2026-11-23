@@ -314,13 +314,26 @@ module SystolicArray #(
     // The read address as this tile's own register: the reducer reads 0 .. N*N - 1 in order, back to back or after a pause from 0, so a
     // counter here equals read_addr_i on every read (a_rd_loc) and the stage-0 selects fan out from inside the tile (the reducer's rd_idx
     // into every group register of the tiles it reads was the T16 meshes' 0.99-1.01 ns at 0.8).
+    // One copy per group of 64 pixels (rd_loc_g), each driving only its group's select: one counter for the whole tile still fanned out
+    // to every group register (tile rd_loc -> rd_st, int8 N16 T16 0.947 at 0.8). The copies are equal by construction; the flow keeps them
+    // apart (no register merging on rd_loc_g), else they fold back into one.
     logic [RPW-1:0] rd_loc;
+    logic [RPW-1:0] rd_loc_g[RG];
     always_ff @(posedge clk_i or negedge rstn_i)
-      if (!rstn_i) rd_loc <= '0;
-      else rd_loc <= read_enable_i ? rd_loc + 1'b1 : '0;
+      if (!rstn_i) begin
+        rd_loc <= '0;
+        for (int j = 0; j < RG; j++) rd_loc_g[j] <= '0;
+      end else begin
+        rd_loc <= read_enable_i ? rd_loc + 1'b1 : '0;
+        for (int j = 0; j < RG; j++) rd_loc_g[j] <= read_enable_i ? rd_loc_g[j] + 1'b1 : '0;
+      end
 `ifndef SYNTHESIS
     a_rd_loc: assert property (@(posedge clk_i) disable iff (!rstn_i) read_enable_i |-> rd_loc == read_addr_i)
       else $error("SystolicArray: a_rd_loc: the local read address %0d is not read_addr_i %0d", rd_loc, read_addr_i);
+    for (genvar j = 0; j < RG; j++) begin : G_LOC_CHK
+      a_rd_loc_g: assert property (@(posedge clk_i) disable iff (!rstn_i) rd_loc_g[j] == rd_loc)
+        else $error("SystolicArray: a_rd_loc_g: group %0d's read address copy %0d is not %0d", j, rd_loc_g[j], rd_loc);
+    end
 `else
     /* verilator lint_off UNUSEDSIGNAL */
     logic unused_addr;
@@ -336,7 +349,7 @@ module SystolicArray #(
     always_ff @(posedge clk_i) begin  // no reset: used only with its stage's valid
       if (read_enable_i) begin
         rd_sa[0] <= rd_loc;
-        for (int j = 0; j < RG; j++) rd_st[0][j] <= part[(j * 64 + (int'(rd_loc) % 64)) / N][(j * 64 + (int'(rd_loc) % 64)) % N];
+        for (int j = 0; j < RG; j++) rd_st[0][j] <= part[(j * 64 + (int'(rd_loc_g[j]) % 64)) / N][(j * 64 + (int'(rd_loc_g[j]) % 64)) % N];
       end
       for (int k = 1; k <= LS; k++)
         if (rd_sv[k-1]) begin
