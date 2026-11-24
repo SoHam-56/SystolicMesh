@@ -259,13 +259,24 @@ module SystolicMesh #(
       .we_o(stgB_we), .waddr_o(stgB_waddr), .wmask_o(stgB_wmask), .wdata_o(stgB_wdata));
   row_writer #(.ROW_WORDS(MATRIX_SIZE), .WW(HOST_WORDS), .DW(DATA_WIDTH), .ROWS(WC_ROWS)) wr_C (
       .we_i(wc_we_q), .waddr_i(wc_addr_q), .wdata_i(wc_data_q), .we_o(wc_we), .waddr_o(wc_waddr), .wmask_o(wc_wmask), .wdata_o(wc_wdata));
-  mem_array #(.DEPTH(STG_ROWS), .WIDTH(ROW_W), .NW(HW_PORTS), .NR(TILES_PER_DIM), .MASK_W(DATA_WIDTH)) mem_A (
+  // The SRAM mappings (memory branch; from the banking audit of 2026-11-24 and these reads' address patterns): A's port q reads tile row q's
+  // slab of T rows, so each slab and half is a bank; B and the cache read row sub_r * TILES_PER_DIM + q collapsed (interleaved by tile
+  // column), slab-wise otherwise. mem_array's a_bank_ports checks every cycle of every run fits the chosen ports.
+  localparam int TPD = TILES_PER_DIM;
+  localparam string B_IMPL = COLLAPSE_K ? "DP" : "SP";
+  localparam int B_BANKS = COLLAPSE_K ? TPD : 2 * TPD, B_STRIDE = COLLAPSE_K ? 1 : TILE_SIZE;
+  localparam string C_IMPL = "DP";  // the cache is filled while it is read (a_bank_ports caught SP at N16 T4 collapsed: one write and one read in a bank)
+  localparam int C_STRIDE = COLLAPSE_K ? 1 : TILE_SIZE;
+  mem_array #(.DEPTH(STG_ROWS), .WIDTH(ROW_W), .NW(HW_PORTS), .NR(TILES_PER_DIM), .MASK_W(DATA_WIDTH), .IMPL("SP"), .BANKS(2 * TPD),
+              .BANK_STRIDE(TILE_SIZE)) mem_A (
       .clk_i(clk_i), .we_i(stgA_we), .waddr_i(stgA_waddr), .wmask_i(stgA_wmask), .wdata_i(stgA_wdata),
       .re_i({TILES_PER_DIM{ctrl_load_en}}), .raddr_i(rdA_addr), .rdata_o(rdA));
-  mem_array #(.DEPTH(STG_ROWS), .WIDTH(ROW_W), .NW(HW_PORTS), .NR(TILES_PER_DIM), .MASK_W(DATA_WIDTH)) mem_B (
+  mem_array #(.DEPTH(STG_ROWS), .WIDTH(ROW_W), .NW(HW_PORTS), .NR(TILES_PER_DIM), .MASK_W(DATA_WIDTH), .IMPL(B_IMPL), .BANKS(B_BANKS),
+              .BANK_STRIDE(B_STRIDE)) mem_B (
       .clk_i(clk_i), .we_i(stgB_we), .waddr_i(stgB_waddr), .wmask_i(stgB_wmask), .wdata_i(stgB_wdata),
       .re_i({TILES_PER_DIM{ctrl_load_en}}), .raddr_i(rdB_addr), .rdata_o(rdB));
-  mem_array #(.DEPTH(WC_ROWS), .WIDTH(ROW_W), .NW(HW_PORTS), .NR(TILES_PER_DIM), .MASK_W(DATA_WIDTH)) wcache (
+  mem_array #(.DEPTH(WC_ROWS), .WIDTH(ROW_W), .NW(HW_PORTS), .NR(TILES_PER_DIM), .MASK_W(DATA_WIDTH), .IMPL(C_IMPL), .BANKS(TPD),
+              .BANK_STRIDE(C_STRIDE)) wcache (
       .clk_i(clk_i), .we_i(wc_we), .waddr_i(wc_waddr), .wmask_i(wc_wmask), .wdata_i(wc_wdata),
       .re_i({TILES_PER_DIM{ctrl_load_en}}), .raddr_i(rdC_addr), .rdata_o(rdC));
   // Tile row sub_r of the load: A's port q is row q * T + sub_r (tile row q's slab); B's is row sub_r * TILES_PER_DIM + q collapsed (each
