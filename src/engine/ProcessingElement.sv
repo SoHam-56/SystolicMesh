@@ -31,7 +31,7 @@ module ProcessingElement #(
   localparam int DATA_WIDTH = sienna_fmt_pkg::DATA_WIDTH;  // operands
   localparam int ACC_DATA_WIDTH = sienna_fmt_pkg::ACC_DATA_WIDTH;  // products and sums
   localparam int ADD_LAT = sienna_fmt_pkg::add_latency(ACC_DATA_WIDTH);  // fmt_add: valid_i at t, done_o at t+ADD_LAT
-  localparam int MUL_LAT = sienna_fmt_pkg::mul_latency(DATA_WIDTH, ACC_DATA_WIDTH);  // fmt_mul: valid_i at t, done_o at t+MUL_LAT
+  localparam int MUL_LAT = sienna_fmt_pkg::MUL_LATENCY;  // fmt_mul MESH: valid_i at t, done_o at t+MUL_LAT (the mesh product's latency)
   localparam int S = ADD_LAT + 1;  // a slot is read again S cycles after its add issues, one after the write-back
   localparam int SW = (U > 1) ? $clog2(U) : 1;
   localparam int CW = $clog2(K + 1);
@@ -47,6 +47,7 @@ module ProcessingElement #(
   logic [2:0] prod_pack;
   // The product and the sum; prod_v: a counted product, only those reach the multiplier.
   logic [ACC_DATA_WIDTH-1:0] prod, sum;
+  logic [ACC_DATA_WIDTH-1:0] add_cand[2];  // add_a's next value for prod_v 0 and 1
   logic prod_v, sum_v;
   // The banks of partial sums and their bookkeeping.
   logic [ACC_DATA_WIDTH-1:0] acc[BANKS][U];
@@ -140,23 +141,38 @@ module ProcessingElement #(
   // The addend is read a cycle ahead into add_a (timing: the bank and slot select stay out of the adder's first stage): from the bank and
   // slot the next product joins, with this cycle's write-back passed through when it lands on that slot, and the zero where the next
   // product is a new set's first into its slot.
+  // Both of prod_v's cases are made beside each other and prod_v (the multiplier's done_o) picks last: it chose the slot ahead of the
+  // bank/slot read and the write-back compares (MUL done_o -> add_a was 68 of the fp32 meshes' worst paths at 0.8).
   always_comb begin
     pass_end = prod_tick && n_last;
     set_end  = pass_end && !prod_more;
-    slot_y   = prod_v ? slot_inc : slot;
+    slot_y   = prod_v ? slot_inc : slot;  // for the checks below only
     rd_x     = acc[cur_inc][0];
     rd_y     = acc[cur][slot_y];
     fresh_n  = (MUL_LAT > 1) ? fresh_d[(MUL_LAT > 1) ? MUL_LAT - 2 : 0] : fresh_i;
     zero_n   = fresh_n && (pass_end || (prod_v ? u1_lt : u_lt));  // the counted products after this edge are below U
     wb_x     = sum_v && (bank_dly[ADD_LAT-1] == cur_inc) && (slot_dly[ADD_LAT-1] == '0);
     wb_y     = sum_v && (bank_dly[ADD_LAT-1] == cur) && (slot_dly[ADD_LAT-1] == slot_y);
+    for (int v = 0; v < 2; v++) begin
+      automatic logic [SW-1:0] sl;
+      automatic logic z, wb;
+      sl = v ? slot_inc : slot;
+      z  = fresh_n && (pass_end || (v ? u1_lt : u_lt));
+      wb = sum_v && (bank_dly[ADD_LAT-1] == cur) && (slot_dly[ADD_LAT-1] == sl);
+      add_cand[v] = z ? '0 : (set_end ? (wb_x ? sum : rd_x) : (wb ? sum : acc[cur][sl]));
+    end
   end
   always_ff @(posedge clk_i or negedge rstn_i)
     if (!rstn_i) add_a <= '0;
-    else add_a <= zero_n ? '0 : (set_end ? (wb_x ? sum : rd_x) : (wb_y ? sum : rd_y));
+    else add_a <= add_cand[prod_v];
+`ifndef SYNTHESIS
+  a_add_cand: assert property (@(posedge clk_i) disable iff (!rstn_i) 1'b1 |->
+      add_cand[prod_v] == (zero_n ? '0 : (set_end ? (wb_x ? sum : rd_x) : (wb_y ? sum : rd_y))))
+    else $error("ProcessingElement: a_add_cand: the late-picked addend %h is not the select's", add_cand[prod_v]);
+`endif
 
   // The product widened to the accumulator (bf16 exactly into fp32, int8 sign-extended into int32), then the accumulator add.
-  fmt_mul #(.DATA_WIDTH(DATA_WIDTH), .EXT_DATA_WIDTH(ACC_DATA_WIDTH)) MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i && in_blk),
+  fmt_mul #(.DATA_WIDTH(DATA_WIDTH), .EXT_DATA_WIDTH(ACC_DATA_WIDTH), .MESH(1'b1)) MUL (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(v_i && in_blk),
       .a_i(a_i), .b_i(b_i), .product_o(prod), .done_o(prod_v));  // prod is X before its first done_o; read with prod_v
   fmt_add #(.DATA_WIDTH(ACC_DATA_WIDTH), .CARRY_SELECT(1'b1)) ADD (.clk_i(clk_i), .rstn_i(rstn_i), .valid_i(prod_v), .a_i(add_a), .b_i(prod), .sum_o(sum),
       .done_o(sum_v));

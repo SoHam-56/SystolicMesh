@@ -476,8 +476,8 @@ module SystolicMesh #(
       end
       if (res_put && rq_last_q) pb_idx <= '0;  // reads stopped at the last beat, so this never meets a read
     end
-  always_ff @(posedge clk_i)
-    if (res_rd) wide_addr_q <= wide_addr;  // no reset: read only with res_rd_q
+  always_ff @(posedge clk_i) wide_addr_q <= wide_addr;  // no reset: read only with res_rd_q, so it loads every cycle (res_rd as the
+                                                     // enable of every address bit was the meshes' res_rd_q -> wide_addr_q at 0.8)
 
   always_comb
     for (int k = 0; k < WIDE_READ; k++)

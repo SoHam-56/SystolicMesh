@@ -28,7 +28,7 @@ module SystolicArray #(
     output logic                               next_final_o,   // so is the one after it, for a reader about to release
     input  logic                               read_enable_i,
     input  logic [          $clog2(N*N)-1:0]   read_addr_i,
-    output logic [U-1:0][sienna_fmt_pkg::ACC_DATA_WIDTH-1:0] read_data_o,    // the pixel's U partial sums, RD_LAT cycles later (1, or 2 from 256 pixels)
+    output logic [U-1:0][sienna_fmt_pkg::ACC_DATA_WIDTH-1:0] read_data_o,    // the pixel's U partial sums, RD_LAT cycles later (one per 64:1 select stage)
     output logic                               read_valid_o,
     input  logic                               release_i,      // the reader is done with the oldest final set
     output logic                               busy_o          // a set is loaded, feeding or unread
@@ -37,9 +37,11 @@ module SystolicArray #(
   localparam int ACC_DATA_WIDTH = sienna_fmt_pkg::ACC_DATA_WIDTH;  // partial sums
   localparam int AD = N * K;  // A and B each hold N*K words per bank
   localparam int BW = (BANKS > 1) ? $clog2(BANKS) : 1;
-  localparam int RD_LAT = (N * N >= 256) ? 2 : 1;  // the read: one cycle, or two from 256 pixels (AccumulationUnit's RD_LAT, the same rule)
   localparam int RPW = $clog2(N * N);  // a pixel address
-  localparam int QW = (N * N) / 4;  // RD_LAT 2: pixels per quarter, each selected into its own register
+  localparam int RSEL = 6;  // address bits a read stage selects on: at most a 64:1 select per register
+  localparam int RD_LAT = (RPW <= RSEL) ? 1 : (RPW + RSEL - 1) / RSEL;  // the read: one cycle per stage (AccumulationUnit's RD_LAT, the same rule)
+  localparam int LS = (RD_LAT > 1) ? RD_LAT - 2 : 0;  // the last tree stage before read_data_o
+  localparam int RG = (N * N + (1 << RSEL) - 1) >> RSEL;  // registers in the first stage, one per group of 64 pixels
   localparam int KW = (K > 1) ? $clog2(K) : 1;
   localparam int OB_AW = $clog2(2 * AD);  // the operand banks' word address
   // A continuing pass reads the slots its set's previous pass wrote: with K < S a PE reuses each slot every pass, so the pass waits S cycles.
@@ -86,9 +88,11 @@ module SystolicArray #(
   logic v_w[N][N+1], f_w[N][N+1], m_w[N][N+1];  // valid and pass flags travel east with A
   logic [2:0] p_w[N][N+1];  // pack shift travels east with A
   logic [U-1:0][ACC_DATA_WIDTH-1:0] part[N][N];
-  logic [U-1:0][ACC_DATA_WIDTH-1:0] rd_q[4];  // RD_LAT 2: the read's first stage, one word per quarter of the pixels (the 256:1 select in one
-  logic [1:0]                       rd_qsel;  // cycle was the T16 meshes' 1.054-1.104 ns, acc_unit rd_idx -> tile read_data_o); its quarter
-  logic                             rd_q_v;
+  // RD_LAT > 1: the read as a tree, each stage a <= 64:1 select into registers (one 256:1 select in a cycle was the T16 meshes' 1.054-1.104 ns,
+  // acc_unit rd_idx -> tile read_data_o): stage k holds one word per 64^(k+1) pixels, beside the address and valid a stage on.
+  logic [U-1:0][ACC_DATA_WIDTH-1:0] rd_st[LS+1][RG];
+  logic [RPW-1:0]                   rd_sa[LS+1];
+  logic                             rd_sv[LS+1];
   logic [BANKS-1:0] pe_final[N*N];
   // The reader's bank, and per bank, registered, whether its set is final in every PE.
   logic [BW-1:0] rb;  // oldest unread accumulator bank
@@ -299,30 +303,70 @@ module SystolicArray #(
         read_valid_o <= read_enable_i;
         if (read_enable_i) read_data_o <= part[read_addr_i/N][read_addr_i%N];
       end else begin
-        read_valid_o <= rd_q_v;
-        if (rd_q_v) read_data_o <= rd_q[rd_qsel];
+        read_valid_o <= rd_sv[LS];
+        if (rd_sv[LS]) read_data_o <= rd_st[LS][int'(rd_sa[LS]) >> (RSEL * (LS + 1))];
       end
     end
   end
-  // RD_LAT 2: the first stage selects within each quarter (a 64:1 select at 256 pixels), the second picks the quarter.
-  if (RD_LAT == 2) begin : G_READ2
+  // RD_LAT > 1: stage 0 selects within each group of 64 pixels on the address' low 6 bits, each later stage within groups of 64 of the
+  // stage before on the next 6, and read_data_o picks among the last stage's words (at 256 pixels: four groups, then the quarter).
+  if (RD_LAT > 1) begin : G_TREE
+    // The read address as this tile's own register: the reducer reads 0 .. N*N - 1 in order, back to back or after a pause from 0, so a
+    // counter here equals read_addr_i on every read (a_rd_loc) and the stage-0 selects fan out from inside the tile (the reducer's rd_idx
+    // into every group register of the tiles it reads was the T16 meshes' 0.99-1.01 ns at 0.8).
+    // One copy per group of 64 pixels (rd_loc_g), each driving only its group's select: one counter for the whole tile still fanned out
+    // to every group register (tile rd_loc -> rd_st, int8 N16 T16 0.947 at 0.8). The copies are equal by construction; the flow keeps them
+    // apart (no register merging on rd_loc_g), else they fold back into one.
+    logic [RPW-1:0] rd_loc;
+    logic [RPW-1:0] rd_loc_g[RG];
     always_ff @(posedge clk_i or negedge rstn_i)
-      if (!rstn_i) rd_q_v <= 1'b0;
-      else rd_q_v <= read_enable_i;
-    always_ff @(posedge clk_i)
-      if (read_enable_i) begin
-        rd_qsel <= read_addr_i[RPW-1-:2];
-        for (int q = 0; q < 4; q++) rd_q[q] <= part[(q * QW + int'(read_addr_i[RPW-3:0])) / N][(q * QW + int'(read_addr_i[RPW-3:0])) % N];
+      if (!rstn_i) begin
+        rd_loc <= '0;
+        for (int j = 0; j < RG; j++) rd_loc_g[j] <= '0;
+      end else begin
+        rd_loc <= read_enable_i ? rd_loc + 1'b1 : '0;
+        for (int j = 0; j < RG; j++) rd_loc_g[j] <= read_enable_i ? rd_loc_g[j] + 1'b1 : '0;
       end
+`ifndef SYNTHESIS
+    a_rd_loc: assert property (@(posedge clk_i) disable iff (!rstn_i) read_enable_i |-> rd_loc == read_addr_i)
+      else $error("SystolicArray: a_rd_loc: the local read address %0d is not read_addr_i %0d", rd_loc, read_addr_i);
+    for (genvar j = 0; j < RG; j++) begin : G_LOC_CHK
+      a_rd_loc_g: assert property (@(posedge clk_i) disable iff (!rstn_i) rd_loc_g[j] == rd_loc)
+        else $error("SystolicArray: a_rd_loc_g: group %0d's read address copy %0d is not %0d", j, rd_loc_g[j], rd_loc);
+    end
+`else
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic unused_addr;
+    assign unused_addr = ^read_addr_i;  // the tile counts the address itself; only the check reads the port
+    /* verilator lint_on UNUSEDSIGNAL */
+`endif
+    always_ff @(posedge clk_i or negedge rstn_i)
+      if (!rstn_i) for (int k = 0; k <= LS; k++) rd_sv[k] <= 1'b0;
+      else begin
+        rd_sv[0] <= read_enable_i;
+        for (int k = 1; k <= LS; k++) rd_sv[k] <= rd_sv[k-1];
+      end
+    always_ff @(posedge clk_i) begin  // no reset: used only with its stage's valid
+      if (read_enable_i) begin
+        rd_sa[0] <= rd_loc;
+        for (int j = 0; j < RG; j++) rd_st[0][j] <= part[(j * 64 + (int'(rd_loc_g[j]) % 64)) / N][(j * 64 + (int'(rd_loc_g[j]) % 64)) % N];
+      end
+      for (int k = 1; k <= LS; k++)
+        if (rd_sv[k-1]) begin
+          rd_sa[k] <= rd_sa[k-1];
+          for (int j = 0; j < RG; j++)
+            if (j * 64 + ((int'(rd_sa[k-1]) >> (RSEL * k)) % 64) < RG) rd_st[k][j] <= rd_st[k-1][j*64+((int'(rd_sa[k-1])>>(RSEL*k))%64)];
+        end
+    end
   end else begin : G_READ1
     /* verilator lint_off UNUSEDSIGNAL */
     logic unused_rd;
-    assign unused_rd = ^{rd_q[0], rd_q[1], rd_q[2], rd_q[3], rd_qsel, rd_q_v};
+    assign unused_rd = ^{rd_st[0][0], rd_sa[0], rd_sv[0]};
     /* verilator lint_on UNUSEDSIGNAL */
-    assign rd_q_v  = 1'b0;
-    assign rd_qsel = '0;
-    for (genvar q = 0; q < 4; q++) begin : G_Q
-      assign rd_q[q] = '0;
+    assign rd_sv[0] = 1'b0;
+    assign rd_sa[0] = '0;
+    for (genvar j = 0; j < RG; j++) begin : G_Z
+      assign rd_st[0][j] = '0;
     end
   end
 
