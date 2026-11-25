@@ -194,8 +194,6 @@ module SystolicArray #(
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
       for (int r = 0; r < N; r++) begin
-        a_feed[r] <= '0;
-        b_feed[r] <= '0;
         v_feed[r] <= 1'b0;
         f_feed[r] <= 1'b0;
         m_feed[r] <= 1'b0;
@@ -207,11 +205,16 @@ module SystolicArray #(
         f_feed[r] <= cmd_f[r];
         m_feed[r] <= cmd_m[r];
         p_feed[r] <= cmd_p[r];
-        a_feed[r] <= cmd_v[r] ? am_rdata[r] : '0;
-        b_feed[r] <= cmd_v[r] ? bm_rdata[r] : '0;  // column r of B
       end
     end
   end
+  // The feed words: a_mem and b_mem read synchronously on cmd_v (an SRAM's read), so their registered words come with v_feed, the
+  // cycle the combinational read's register gave them (step C of the memory plan: no latency change).
+  always_comb
+    for (int r = 0; r < N; r++) begin
+      a_feed[r] = v_feed[r] ? am_rdata[r] : '0;
+      b_feed[r] = v_feed[r] ? bm_rdata[r] : '0;  // column r of B
+    end
   always_comb begin
     for (int c = 0; c < WEST_WORDS; c++) begin
       am_we[c]    = west_write_enable_i && wa < AD;
@@ -228,10 +231,12 @@ module SystolicArray #(
       bm_raddr[r] = OB_AW'(int'(cmd_ob[r]) * AD + int'(cmd_kk[r]) * N + r);
     end
   end
-  mem_array #(.DEPTH(2 * AD), .WIDTH(DATA_WIDTH), .NW(WEST_WORDS), .NR(N), .SYNC_READ(1'b0)) a_mem (
-      .clk_i(clk_i), .we_i(am_we), .waddr_i(am_waddr), .wmask_i('1), .wdata_i(am_wdata), .re_i('1), .raddr_i(am_raddr), .rdata_o(am_rdata));
-  mem_array #(.DEPTH(2 * AD), .WIDTH(DATA_WIDTH), .NW(NORTH_WORDS), .NR(N), .SYNC_READ(1'b0)) b_mem (
-      .clk_i(clk_i), .we_i(bm_we), .waddr_i(bm_waddr), .wmask_i('1), .wdata_i(bm_wdata), .re_i('1), .raddr_i(bm_raddr), .rdata_o(bm_rdata));
+  logic [N-1:0] feed_re;  // row r reads on its command
+  always_comb for (int r = 0; r < N; r++) feed_re[r] = cmd_v[r];
+  mem_array #(.DEPTH(2 * AD), .WIDTH(DATA_WIDTH), .NW(WEST_WORDS), .NR(N), .SYNC_READ(1'b1)) a_mem (
+      .clk_i(clk_i), .we_i(am_we), .waddr_i(am_waddr), .wmask_i('1), .wdata_i(am_wdata), .re_i(feed_re), .raddr_i(am_raddr), .rdata_o(am_rdata));
+  mem_array #(.DEPTH(2 * AD), .WIDTH(DATA_WIDTH), .NW(NORTH_WORDS), .NR(N), .SYNC_READ(1'b1)) b_mem (
+      .clk_i(clk_i), .we_i(bm_we), .waddr_i(bm_waddr), .wmask_i('1), .wdata_i(bm_wdata), .re_i(feed_re), .raddr_i(bm_raddr), .rdata_o(bm_rdata));
 
   // ── PE grid ───────────────────────────────────────────────────────────
   for (genvar r = 0; r < N; r++) begin : FEED
