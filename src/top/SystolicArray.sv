@@ -88,6 +88,7 @@ module SystolicArray #(
   logic v_w[N][N+1], f_w[N][N+1], m_w[N][N+1];  // valid and pass flags travel east with A
   logic [2:0] p_w[N][N+1];  // pack shift travels east with A
   logic [U-1:0][ACC_DATA_WIDTH-1:0] part[N][N];
+  logic [N*N-1:0] rd_oh1;  // RD_LAT == 1: the read position, one-hot (G_FLAT_RD)
   // RD_LAT > 1: the read as a tree, each stage a <= 64:1 select into registers (one 256:1 select in a cycle was the T16 meshes' 1.054-1.104 ns,
   // acc_unit rd_idx -> tile read_data_o): stage k holds one word per 64^(k+1) pixels, beside the address and valid a stage on.
   logic [U-1:0][ACC_DATA_WIDTH-1:0] rd_st[LS+1][RG];
@@ -301,12 +302,35 @@ module SystolicArray #(
       end
       if (RD_LAT == 1) begin
         read_valid_o <= read_enable_i;
-        if (read_enable_i) read_data_o <= part[read_addr_i/N][read_addr_i%N];
+        if (read_enable_i) begin
+          automatic logic [U-1:0][ACC_DATA_WIDTH-1:0] w;  // the pixel's word: an AND-OR on the one-hot read position
+          w = '0;
+          for (int i = 0; i < N * N; i++) w |= {(U * ACC_DATA_WIDTH){rd_oh1[i]}} & part[i/N][i%N];
+          read_data_o <= w;
+        end
       end else begin
         read_valid_o <= rd_sv[LS];
         if (rd_sv[LS]) read_data_o <= rd_st[LS][int'(rd_sa[LS]) >> (RSEL * (LS + 1))];
       end
     end
+  end
+  // RD_LAT == 1: the read position held decoded, a one-hot ring over the tile's pixels (the reducer reads them 0 .. N*N - 1 in order,
+  // back to back or after a pause from 0), so no decode of read_addr_i sits in front of the N*N:1 select (the reducer's rd_idx into a
+  // 64:1 select was int8 N16 T8's and N8 T8's 0.87-0.91 at 4200cb3, rd_idx -> tile/read_data_o).
+  if (RD_LAT == 1) begin : G_FLAT_RD
+    always_ff @(posedge clk_i or negedge rstn_i)
+      if (!rstn_i) rd_oh1 <= (N * N)'(1);
+      else rd_oh1 <= read_enable_i ? {rd_oh1[N*N-2:0], rd_oh1[N*N-1]} : (N * N)'(1);
+`ifndef SYNTHESIS
+    a_rd_oh1: assert property (@(posedge clk_i) disable iff (!rstn_i) read_enable_i |-> rd_oh1 == ((N * N)'(1) << read_addr_i))
+      else $error("SystolicArray: a_rd_oh1: the one-hot read position %h is not pixel %0d", rd_oh1, read_addr_i);
+`endif
+  end else begin : G_TREE_RD
+    assign rd_oh1 = '0;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic unused_oh1;
+    assign unused_oh1 = ^rd_oh1;
+    /* verilator lint_on UNUSEDSIGNAL */
   end
   // RD_LAT > 1: stage 0 selects within each group of 64 pixels on the address' low 6 bits, each later stage within groups of 64 of the
   // stage before on the next 6, and read_data_o picks among the last stage's words (at 256 pixels: four groups, then the quarter).
@@ -317,22 +341,27 @@ module SystolicArray #(
     // One copy per group of 64 pixels (rd_loc_g), each driving only its group's select: one counter for the whole tile still fanned out
     // to every group register (tile rd_loc -> rd_st, int8 N16 T16 0.947 at 0.8). The copies are equal by construction; the flow keeps them
     // apart (no register merging on rd_loc_g), else they fold back into one.
+    // Each group's stage-0 select held decoded: a one-hot ring of 64 (rd_oh_g), rotated a place per read and back to pixel 0 between
+    // reads, as the address counts. Each bit picks one word (fanout one word wide) and an OR tree takes the group's word: no 6-bit
+    // decode into a 64:1 select (each copy's decode and its fanout to every select were fp32 / bf16 N16 T16's 0.94 at 4200cb3,
+    // rd_loc_g -> rd_st). The rings are equal by construction; the flow keeps them apart (no register merging on rd_oh_g).
+    localparam int GW = 1 << RSEL;  // pixels per group
     logic [RPW-1:0] rd_loc;
-    logic [RPW-1:0] rd_loc_g[RG];
+    logic [GW-1:0]  rd_oh_g[RG];
     always_ff @(posedge clk_i or negedge rstn_i)
       if (!rstn_i) begin
         rd_loc <= '0;
-        for (int j = 0; j < RG; j++) rd_loc_g[j] <= '0;
+        for (int j = 0; j < RG; j++) rd_oh_g[j] <= GW'(1);
       end else begin
         rd_loc <= read_enable_i ? rd_loc + 1'b1 : '0;
-        for (int j = 0; j < RG; j++) rd_loc_g[j] <= read_enable_i ? rd_loc_g[j] + 1'b1 : '0;
+        for (int j = 0; j < RG; j++) rd_oh_g[j] <= read_enable_i ? {rd_oh_g[j][GW-2:0], rd_oh_g[j][GW-1]} : GW'(1);
       end
 `ifndef SYNTHESIS
     a_rd_loc: assert property (@(posedge clk_i) disable iff (!rstn_i) read_enable_i |-> rd_loc == read_addr_i)
       else $error("SystolicArray: a_rd_loc: the local read address %0d is not read_addr_i %0d", rd_loc, read_addr_i);
     for (genvar j = 0; j < RG; j++) begin : G_LOC_CHK
-      a_rd_loc_g: assert property (@(posedge clk_i) disable iff (!rstn_i) rd_loc_g[j] == rd_loc)
-        else $error("SystolicArray: a_rd_loc_g: group %0d's read address copy %0d is not %0d", j, rd_loc_g[j], rd_loc);
+      a_rd_oh: assert property (@(posedge clk_i) disable iff (!rstn_i) rd_oh_g[j] == (GW'(1) << (int'(rd_loc) % GW)))
+        else $error("SystolicArray: a_rd_oh: group %0d's one-hot select %h is not pixel %0d", j, rd_oh_g[j], int'(rd_loc) % GW);
     end
 `else
     /* verilator lint_off UNUSEDSIGNAL */
@@ -349,7 +378,13 @@ module SystolicArray #(
     always_ff @(posedge clk_i) begin  // no reset: used only with its stage's valid
       if (read_enable_i) begin
         rd_sa[0] <= rd_loc;
-        for (int j = 0; j < RG; j++) rd_st[0][j] <= part[(j * 64 + (int'(rd_loc_g[j]) % 64)) / N][(j * 64 + (int'(rd_loc_g[j]) % 64)) % N];
+        for (int j = 0; j < RG; j++) begin
+          automatic logic [U-1:0][ACC_DATA_WIDTH-1:0] w;  // the group's word: an AND-OR on the one-hot select
+          w = '0;
+          for (int i = 0; i < GW; i++)
+            if (j * GW + i < N * N) w |= {(U * ACC_DATA_WIDTH){rd_oh_g[j][i]}} & part[(j * GW + i) / N][(j * GW + i) % N];
+          rd_st[0][j] <= w;
+        end
       end
       for (int k = 1; k <= LS; k++)
         if (rd_sv[k-1]) begin
