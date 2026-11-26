@@ -366,9 +366,20 @@ module SystolicMesh #(
 
   // ── Bias queue: sums reach the reducers in the order they were started ──
   assign bias_push = start_accept && !last_partial;
-  always_comb begin
-    for (int c = 0; c < MATRIX_SIZE; c++) red_bias[c] = bias_qv[bq_rd] ? bias_q[bq_rd][c] : '0;
-  end
+  // The head entry as a register (bq_head == bias_qv[bq_rd] ? bias_q[bq_rd] : 0, every cycle): its next value comes from next cycle's read
+  // slot, a push into that slot this cycle first. The reducers take a register, not bq_rd's select through the fanout to every one of
+  // them (bq_rd -> acc_unit/rd_bias was six N16 meshes' limit at 4200cb3, 0.84-0.92).
+  logic [MATRIX_SIZE-1:0][ACC_DATA_WIDTH-1:0] bq_head;
+  always_ff @(posedge clk_i or negedge rstn_i)
+    if (!rstn_i) bq_head <= '0;
+    else begin
+      automatic logic [$clog2(BIAS_Q)-1:0] nrd;
+      nrd = reduce_start_q ? bq_rd + 1'b1 : bq_rd;
+      for (int c = 0; c < MATRIX_SIZE; c++)
+        if (bias_push && bq_wr == nrd) bq_head[c] <= stg_bias_v ? bias_i[c] : '0;
+        else bq_head[c] <= bias_qv[nrd] ? bias_q[nrd][c] : '0;
+    end
+  assign red_bias = bq_head;
 
   always_ff @(posedge clk_i or negedge rstn_i) begin
     if (!rstn_i) begin
@@ -651,6 +662,13 @@ module SystolicMesh #(
     else $error("SystolicMesh: a bias came with a later pass of a sum; it belongs with the first");
   a_bias_queue_room: assert property (@(posedge clk_i) disable iff (!rstn_i) (sa_q && !sa_last_partial_q) |-> sa_bq_n_q < BIAS_Q)
     else $error("SystolicMesh: bias queue overflow");
+  logic bq_head_ok;  // every column of the head register is entry bq_rd's (0 for an entry without a bias)
+  always_comb begin
+    bq_head_ok = 1'b1;
+    for (int c = 0; c < MATRIX_SIZE; c++) if (bq_head[c] != (bias_qv[bq_rd] ? bias_q[bq_rd][c] : '0)) bq_head_ok = 1'b0;
+  end
+  a_bq_head: assert property (@(posedge clk_i) disable iff (!rstn_i) bq_head_ok)
+    else $error("SystolicMesh: a_bq_head: the bias queue's head register is not entry %0d", bq_rd);
   a_bias_queue_held: assert property (@(posedge clk_i) disable iff (!rstn_i) reduce_start |-> bq_n != 0)
     else $error("SystolicMesh: a reduce started with no bias queued");
   a_wc_bus: assert property (@(posedge clk_i) disable iff (!rstn_i) !(wc_write_enable_i && north_write_enable_i))
